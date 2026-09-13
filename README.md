@@ -12,6 +12,7 @@ This library provides several versions of the Rhetorical Structure (RST) parser 
   * [Installation & Quick Start](#installation--quick-start)
   * [Visualizing the RST Tree](#visualizing-the-rst-tree)
   * [Advanced Usage](#advanced-usage)
+    * [Fine-Tuning UniRST on Native GUM Relations](#fine-tuning-unirst-on-native-gum-relations)
   * [Docker Setup](#docker-setup)
   * [Citation](#citation)
 
@@ -105,7 +106,6 @@ To use the multilingual UniRST model, you can specify the required relation inve
                    cuda_device=0,
                    relinventory='eng.erst.gum')
    ```
-   
 
 ### 3\. Understanding the Output
 
@@ -186,6 +186,80 @@ isanlp_rst.to_pdf("filename.rs3", "filename.pdf")
 -----
 
 ## Advanced Usage
+
+### Fine-Tuning UniRST on Native GUM Relations
+
+The GUM fine-tuning command adapts only the relation-prediction head of the
+released UniRST model. It predicts the 50 relation/nuclearity combinations
+observed in GUM V11.1 instead of UniRST's collapsed GUM labels. The encoder,
+tree parser, and GUM segmenter remain frozen.
+
+The expected data layout is:
+
+```text
+data/
+├── gum_rs3/en/*.rs3
+├── gum_file_lists/files.train
+├── gum_file_lists/files.dev
+└── gum_file_lists/files.test
+```
+
+Run training from the repository root:
+
+```bash
+python -m isanlp_rst.universal_parser.finetune_gum_relations \
+  --data_root=data \
+  --data_manager_path=data/data_manager_gum_fine.pickle \
+  --save_dir=saves \
+  --run_name=gum_v11_1_fine_relations \
+  --cuda_device=0 \
+  --batch_size=1 \
+  --epochs=20
+```
+
+If the manager cache does not exist, the command prepares the RS3 documents
+and creates it. If it does exist, its serialized paths are rebased to
+`--data_root`; the command stops with an error if that root does not contain
+prepared GUM documents. Use `--cuda_device=-1` for CPU execution.
+
+Checkpoints are selected using relation F1 on the validation split with gold
+EDU boundaries. The held-out test split is evaluated only once, after the best
+validation checkpoint is restored. The run directory contains:
+
+```text
+saves/gum_v11_1_fine_relations/
+├── best_relation_head.pt
+├── config.json
+├── relation_table_eng.erst.gum.txt
+├── best_metrics.json
+└── test_metrics.json
+```
+
+Keep the first three files together: inference uses `config.json` to reload the
+exact pinned UniRST base revision and validates the relation inventory before
+installing the fine-tuned head.
+
+```python
+from isanlp_rst.parser import Parser
+
+parser = Parser(
+    relation_head_dir='saves/gum_v11_1_fine_relations',
+    cuda_device=0,
+)
+
+# End-to-end parsing, including EDU segmentation.
+result = parser('A document to parse.')
+
+# Alternatively, preserve externally supplied EDU boundaries.
+result_from_edus = parser.from_edus([
+    'The experiment finished.',
+    'The results were encouraging.',
+])
+```
+
+Relations in the returned RST tree use native GUM V11.1 names such as
+`causal-result` and `contingency-condition`, together with their predicted
+nuclearity.
 
 ### Parsing Pre-Segmented EDUs
 

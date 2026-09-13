@@ -12,7 +12,12 @@ from tqdm import tqdm
 from isanlp_rst.universal_parser.src.corpus.binary_tree import BinaryTree
 from isanlp_rst.universal_parser.src.corpus.data import Rs3Document
 from isanlp_rst.universal_parser.src.parser.data import Data
-from isanlp_rst.universal_parser.src.parser.data import RelationTableGUM, RelationTableRSTDT, RelationTableRuRSTB
+from isanlp_rst.universal_parser.src.parser.data import (
+    RelationTableGUM,
+    RelationTableGUMFine,
+    RelationTableRSTDT,
+    RelationTableRuRSTB,
+)
 
 random.seed(42)
 
@@ -33,14 +38,29 @@ class ParserInput:
 
 class DataManager:
     def __init__(self, corpus,
-                 cross_validation=False, nfolds=5, ):
+                 cross_validation=False, nfolds=5,
+                 relation_granularity='coarse', data_root='data'):
         """
         :param corpus: str  - from {'GUM', 'RST-DT', 'RuRSTB', 'RST-DT-tr',}
         :param cross_validation: bool  - whether to split to stratified train/dev/tests randomly
         :param nfolds: int  - [If cross_validation == True] number of splits for cross validation
+        :param relation_granularity: str  - one of {'coarse', 'fine'}
+        :param data_root: str or Path  - root directory for source and prepared data
         """
         assert corpus in ('GUM', 'RST-DT', 'RuRSTB', 'RST-DT-tr', 'GUM10-tr', 'MAZ-tr')
+        if relation_granularity not in {'coarse', 'fine'}:
+            raise ValueError(
+                "relation_granularity must be either 'coarse' or 'fine', "
+                f'got {relation_granularity!r}'
+            )
+        if relation_granularity == 'fine' and corpus not in {'GUM', 'GUM10-tr'}:
+            raise NotImplementedError(
+                'Fine-grained relation loading is currently implemented only for GUM'
+            )
+
         self.corpus_name = corpus
+        self.relation_granularity = relation_granularity
+        self.data_root = Path(data_root)
 
         if self.corpus_name == 'GUM':
             self._init_gum_corpus(cross_validation, nfolds)
@@ -59,24 +79,30 @@ class DataManager:
 
     def _init_gum_corpus(self, cross_validation, nfolds, translated=False):
         if translated:
-            self.input_path = 'data/gum10_tr_rs3'
-            self.output_path = Path('data/gum10_tr_prepared')
+            self.input_path = self.data_root / 'gum10_tr_rs3'
+            prepared_dir = (
+                'gum10_tr_fine_prepared'
+                if self.relation_granularity == 'fine'
+                else 'gum10_tr_prepared'
+            )
+            self.output_path = self.data_root / prepared_dir
         else:
-            self.input_path = 'data/gum_rs3'
-            self.output_path = Path('data/gum_prepared')
+            self.input_path = self.data_root / 'gum_rs3'
+            prepared_dir = 'gum_fine_prepared' if self.relation_granularity == 'fine' else 'gum_prepared'
+            self.output_path = self.data_root / prepared_dir
 
         self.output_path.mkdir(parents=True, exist_ok=True)
         self.cross_validation = cross_validation
         if self.cross_validation:
             self.nfolds = nfolds
-            self.folds = defaultdict(dict[int, dict])
-            self.mixed_folds_en = defaultdict(dict[int, list])
-            self.mixed_folds_ru = defaultdict(dict[int, list])
+            self.folds = defaultdict(dict)
+            self.mixed_folds_en = defaultdict(dict)
+            self.mixed_folds_ru = defaultdict(dict)
         else:
             self.corpus = dict()
 
-            self.mixed_train_en = defaultdict(list[dict[int, list]])
-            self.mixed_train_ru = defaultdict(list[dict[int, list]])
+            self.mixed_train_en = defaultdict(list)
+            self.mixed_train_ru = defaultdict(list)
             self.mixed_folds = 5
             for i in [25, 50, 75, 100]:
                 self.mixed_train_en[i] = []
@@ -84,29 +110,41 @@ class DataManager:
 
         self.langs = ['en', 'ru']
 
-        self.relation_table = RelationTableGUM
-        self.relation_dic = {word.lower(): i for i, word in enumerate(RelationTableGUM)}
-        self.relation_fixer = {
-            'topic_ns': 'contingency_ns',  # One example of this type in GUM v9.1
-            'restatement_sn': 'restatement_ns'  # 4 examples in GUM_conversation_gossip
-        }
+        self.relation_table = (
+            RelationTableGUMFine
+            if self.relation_granularity == 'fine'
+            else RelationTableGUM
+        )
+        self.relation_dic = {word.lower(): i for i, word in enumerate(self.relation_table)}
+        self.relation_fixer = {}
+        if self.relation_granularity == 'coarse':
+            self.relation_fixer = {
+                # UniRST's released GUM inventory uses Condition rather than
+                # the native GUM top-level name Contingency.
+                'contingency_ns': 'condition_ns',
+                'contingency_sn': 'condition_sn',
+                # Compatibility with the exceptional labels in older GUM
+                # releases previously supported by this loader.
+                'topic_ns': 'condition_ns',
+                'restatement_sn': 'restatement_ns',
+            }
 
     def _init_rstdt_corpus(self, nfolds, translated=False):
         # The corpus is converted to *.rs3 with https://github.com/rst-workbench/rst-converter-service
 
         if translated:
-            self.input_path = 'data/rstdt_tr_rs3'
-            self.output_path = Path('data/rstdt_tr_prepared')
+            self.input_path = self.data_root / 'rstdt_tr_rs3'
+            self.output_path = self.data_root / 'rstdt_tr_prepared'
         else:
-            self.input_path = 'data/rstdt_rs3'
-            self.output_path = Path('data/rstdt_prepared')
+            self.input_path = self.data_root / 'rstdt_rs3'
+            self.output_path = self.data_root / 'rstdt_prepared'
 
         self.output_path.mkdir(parents=True, exist_ok=True)
 
         # There is no fixed validation part in RST-DT,
         # so we'll take random parts of training for validation for each "fold"
         self.nfolds = nfolds
-        self.folds = defaultdict(dict[int, dict])
+        self.folds = defaultdict(dict)
 
         class2rel = {
             'Attribution': ['attribution', 'attribution-e', 'attribution-n', 'attribution-negative'],
@@ -165,8 +203,8 @@ class DataManager:
         # (although it still marks the beginning of a paragraph here, not the ending)
         # Also the corpus converted from rs3 -> isanlp -> rs3 to fix empty spans
 
-        self.input_path = 'data/rurstb_rs3'
-        self.output_path = Path('data/rurstb_prepared')
+        self.input_path = self.data_root / 'rurstb_rs3'
+        self.output_path = self.data_root / 'rurstb_prepared'
         self.output_path.mkdir(parents=True, exist_ok=True)
         self.cross_validation = False
         self.corpus = {'train': [], 'dev': [], 'test': []}
@@ -339,9 +377,16 @@ class DataManager:
             golden_metric = [' '.join(doc.label_for_metrics_list) for doc in docs]
             parents_index = [doc.parents for doc in docs]
             sibling = [doc.siblings for doc in docs]
-            result[key] = Data(input_sentences, edu_breaks, decoder_input,
-                               relation_label, parsing_breaks, golden_metric,
-                               parents_index, sibling)
+            result[key] = Data(
+                input_sentences=input_sentences,
+                edu_breaks=edu_breaks,
+                decoder_input=decoder_input,
+                relation_label=relation_label,
+                parsing_breaks=parsing_breaks,
+                golden_metric=golden_metric,
+                parents_index=parents_index,
+                sibling=sibling,
+            )
 
         return result['train'], result['dev'], result['test']
 
@@ -383,16 +428,23 @@ class DataManager:
             golden_metric = [' '.join(doc.label_for_metrics_list) for doc in docs]
             parents_index = [doc.parents for doc in docs]
             sibling = [doc.siblings for doc in docs]
-            result[key] = Data(input_sentences, edu_breaks, decoder_input,
-                               relation_label, parsing_breaks, golden_metric,
-                               parents_index, sibling)
+            result[key] = Data(
+                input_sentences=input_sentences,
+                edu_breaks=edu_breaks,
+                decoder_input=decoder_input,
+                relation_label=relation_label,
+                parsing_breaks=parsing_breaks,
+                golden_metric=golden_metric,
+                parents_index=parents_index,
+                sibling=sibling,
+            )
 
         return result['train'], result['dev'], result['test']
 
     def construct_corpus(self):
         if self.corpus_name == 'GUM':
             for part in ('train', 'dev', 'test'):
-                self.corpus[part] = open(os.path.join('data', 'gum_file_lists', 'files.' + part),
+                self.corpus[part] = open(self.data_root / 'gum_file_lists' / ('files.' + part),
                                          'r').read().splitlines()
 
         elif self.corpus_name == 'GUM10-tr':
@@ -507,7 +559,7 @@ class DataManager:
             sentence_list.append([left, right])
         return sentence_list
 
-    def parse_sentence(self, root_node, edus_list, is_depth_manner, coarse=True):
+    def parse_sentence(self, root_node, edus_list, is_depth_manner):
         def get_depth_manner_node_list(root):
             node_list = []
             stack = []
@@ -568,12 +620,16 @@ class DataManager:
                 #   LabelforMetric:
                 left_child_span = node.left.span
                 right_child_span = node.right.span
-                nuclearity = node.relation[:2]
-                relation = node.relation[3:]
+                nuclearity, separator, relation = node.relation.partition('-')
+                if separator == '' or nuclearity not in {'NN', 'NS', 'SN'} or relation == '':
+                    raise ValueError(
+                        f'Invalid relation label {node.relation!r} in {self.corpus_name}; '
+                        "expected '<NN|NS|SN>-<relation>'"
+                    )
 
                 # Label to Class
                 if self.corpus_name in ('GUM', 'GUM10-tr'):
-                    if coarse and relation != 'same-unit':
+                    if self.relation_granularity == 'coarse' and relation != 'same-unit':
                         relation = relation.split('-')[0]
                 elif self.corpus_name in ['RST-DT', 'RuRSTB', 'RST-DT-tr']:
                     relation = self.rel2class.get(relation.lower())
@@ -587,7 +643,14 @@ class DataManager:
                     if relation != 'same-unit':
                         relation = relation[0].upper() + relation[1:]
 
-                parser_input.relation.append(self.relation_dic[lookup_relation])
+                try:
+                    relation_index = self.relation_dic[lookup_relation]
+                except KeyError as exc:
+                    raise ValueError(
+                        f'Unknown {self.relation_granularity} relation label '
+                        f'{lookup_relation!r} for {self.corpus_name}'
+                    ) from exc
+                parser_input.relation.append(relation_index)
                 left_nuclearity = 'Nucleus' if nuclearity[0] == 'N' else 'Satellite'
                 right_nuclearity = 'Nucleus' if nuclearity[1] == 'N' else 'Satellite'
                 if nuclearity == 'NS' or nuclearity == 'SN':
@@ -674,8 +737,8 @@ class DataManager:
         """ Populates a self.mixed_folds_en{25: ..., 75: ..., 100: ...} dictionary
             with n% train files from first language and 100-n% from the second. """
 
-        mixed_folds_en = defaultdict(dict[str, list])
-        mixed_folds_ru = defaultdict(dict[str, list])
+        mixed_folds_en = defaultdict(dict)
+        mixed_folds_ru = defaultdict(dict)
         for fold_num, fold in self.folds.items():
             # Base English, mixing Russian #############
             mixed_folds_en[fold_num]['dev'] = fold['dev'][:]
@@ -708,8 +771,13 @@ class DataManager:
         self.mixed_folds_ru[n] = mixed_folds_ru
 
 
-def collect(corpus='GUM', output_path='data/data_manager.pickle'):
-    dp = DataManager(corpus=corpus)
+def collect(corpus='GUM', output_path='data/data_manager.pickle',
+            relation_granularity='coarse', data_root='data'):
+    dp = DataManager(
+        corpus=corpus,
+        relation_granularity=relation_granularity,
+        data_root=data_root,
+    )
     dp.from_rs3()
     dp.save(output_path)
 

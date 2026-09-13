@@ -127,6 +127,56 @@ class PredictorUniRST(BasePredictor):
         self._load_model()
 
     @classmethod
+    def from_gum_fine_head(cls, artifact_dir: str, cuda_device: int = -1):
+        """Load a validation-selected GUM fine-relation head for inference.
+
+        ``artifact_dir`` is the run directory emitted by
+        :mod:`finetune_gum_relations`. Its provenance pins the released base
+        checkpoint, while ``best_relation_head.pt`` supplies the adapted head.
+        """
+
+        artifact_dir = os.path.abspath(os.path.expanduser(artifact_dir))
+        config_path = os.path.join(artifact_dir, 'config.json')
+        head_path = os.path.join(artifact_dir, 'best_relation_head.pt')
+        inventory_path = os.path.join(artifact_dir, 'relation_table_eng.erst.gum.txt')
+        for required_path in (config_path, head_path, inventory_path):
+            if not os.path.isfile(required_path):
+                raise FileNotFoundError(f'Missing fine-head artifact file: {required_path}')
+
+        with open(config_path, 'r', encoding='utf8') as stream:
+            metadata = json.load(stream)
+        if metadata.get('task') != 'gum_fine_relation_head':
+            raise ValueError(f'{config_path} is not a GUM fine-head artifact')
+        model_name = metadata.get('base_model')
+        revision = metadata.get('base_revision')
+        if not model_name or not revision:
+            raise ValueError('Fine-head metadata must pin base_model and base_revision')
+
+        from .relation_finetuning import load_gum_fine_head
+        from .src.parser.data import RelationTableGUMFine
+
+        with open(inventory_path, 'r', encoding='utf8') as stream:
+            inventory = [line.strip() for line in stream if line.strip()]
+        if inventory != list(RelationTableGUMFine):
+            raise ValueError('Fine-head relation inventory does not match RelationTableGUMFine')
+        metadata_inventory = metadata.get('relation_inventory')
+        if metadata_inventory is not None and metadata_inventory != inventory:
+            raise ValueError('Fine-head config and relation-table file disagree')
+
+        predictor = cls(
+            hf_model_name=model_name,
+            hf_model_version=revision,
+            relinventory='eng.erst.gum',
+            cuda_device=cuda_device,
+        )
+        load_gum_fine_head(
+            predictor.model, head_path, map_location=predictor._cuda_device)
+        predictor.label_maps = None
+        predictor.model.eval()
+        predictor.fine_head_metadata = metadata
+        return predictor
+
+    @classmethod
     def _ensure_module_aliases(cls) -> None:
         if cls._aliases_registered:
             return

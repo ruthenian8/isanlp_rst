@@ -54,7 +54,9 @@ class TrainingManager:
                  patience, use_micro_f1, use_dwa_loss, dwa_bs,
                  save_dir, use_amp, warmup_epochs=0, combine_batches=False,
                  use_discriminator=False, discriminator_warmup=0, discriminator_alpha=1.,
-                 project=None, run_name=None, config=None):
+                 project=None, run_name=None, config=None,
+                 loss_mode='all', selection_metric='e2e_val_f1_span',
+                 evaluate_test_each_epoch=True, checkpoint_scope='full'):
         """
         Initializes the TrainingManager.
 
@@ -113,10 +115,18 @@ class TrainingManager:
         self.discriminator_warmup = discriminator_warmup
         self.discriminator_alpha = discriminator_alpha
         self.use_amp = use_amp
+        if loss_mode not in {'all', 'relation'}:
+            raise ValueError("loss_mode must be either 'all' or 'relation'")
+        if checkpoint_scope not in {'full', 'relation_head'}:
+            raise ValueError("checkpoint_scope must be either 'full' or 'relation_head'")
+        self.loss_mode = loss_mode
+        self.selection_metric = selection_metric
+        self.evaluate_test_each_epoch = evaluate_test_each_epoch
+        self.checkpoint_scope = checkpoint_scope
 
         # self.run = wandb.init(project=project, name=run_name, config=config)
         # run_name = self.run.name if self.run.name else 'tmp'
-        self.save_dir = Path(os.path.join(save_dir, run_name))
+        self.save_dir = Path(save_dir) / (run_name or 'run')
         if self.save_dir.exists():
             shutil.rmtree(self.save_dir)
         self.save_dir.mkdir(parents=True)
@@ -125,8 +135,12 @@ class TrainingManager:
 
         if transformer_lr_multiplier:
             transformer_parameters_ids = list(map(id, self.model.encoder.transformer.parameters()))
-            other_parameters = filter(lambda p: id(p) not in transformer_parameters_ids, self.model.parameters())
-            transformer_parameters = filter(lambda p: id(p) in transformer_parameters_ids, self.model.parameters())
+            other_parameters = filter(
+                lambda p: p.requires_grad and id(p) not in transformer_parameters_ids,
+                self.model.parameters())
+            transformer_parameters = filter(
+                lambda p: p.requires_grad and id(p) in transformer_parameters_ids,
+                self.model.parameters())
 
             # segmenter_parameters_ids = list(map(id, self.model.segmenter.parameters()))
             # parser_parameters = filter(lambda p: id(p) not in segmenter_parameters_ids, other_parameters)
@@ -141,7 +155,7 @@ class TrainingManager:
 
         else:
             self.optimizer = optim.AdamW(
-                self.model.parameters(),
+                (p for p in self.model.parameters() if p.requires_grad),
                 lr=self.lr,
                 weight_decay=self.weight_decay
             )
@@ -175,7 +189,7 @@ class TrainingManager:
         self.best_epoch = 0
         best_metrics = {
             'epoch': 0,
-            'e2e_val_f1_span': 0,
+            self.selection_metric: float('-inf'),
         }
         patience_counter = 0
 
@@ -202,33 +216,38 @@ class TrainingManager:
                 'gs_val_f1_nuc': metrics_gs_dev['f1_nuclearity'],
                 'gs_val_f1_rel': metrics_gs_dev['f1_relation'],
                 'gs_val_f1_full': metrics_gs_dev['f1_full'],
-                'gs_test_f1_span': metrics_gs_test['f1_span'],
-                'gs_test_f1_nuc': metrics_gs_test['f1_nuclearity'],
-                'gs_test_f1_rel': metrics_gs_test['f1_relation'],
-                'gs_test_f1_full': metrics_gs_test['f1_full'],
                 'e2e_val_f1_seg': metrics_dev['f1_seg'],
                 'e2e_val_f1_span': metrics_dev['f1_span'],
                 'e2e_val_f1_nuc': metrics_dev['f1_nuclearity'],
                 'e2e_val_f1_rel': metrics_dev['f1_relation'],
                 'e2e_val_f1_full': metrics_dev['f1_full'],
-                'e2e_test_f1_seg': metrics_test['f1_seg'],
-                'e2e_test_f1_span': metrics_test['f1_span'],
-                'e2e_test_f1_nuc': metrics_test['f1_nuclearity'],
-                'e2e_test_f1_rel': metrics_test['f1_relation'],
-                'e2e_test_f1_full': metrics_test['f1_full'],
             }
+            if metrics_test is not None:
+                metrics_all.update({
+                    'gs_test_f1_span': metrics_gs_test['f1_span'],
+                    'gs_test_f1_nuc': metrics_gs_test['f1_nuclearity'],
+                    'gs_test_f1_rel': metrics_gs_test['f1_relation'],
+                    'gs_test_f1_full': metrics_gs_test['f1_full'],
+                    'e2e_test_f1_seg': metrics_test['f1_seg'],
+                    'e2e_test_f1_span': metrics_test['f1_span'],
+                    'e2e_test_f1_nuc': metrics_test['f1_nuclearity'],
+                    'e2e_test_f1_rel': metrics_test['f1_relation'],
+                    'e2e_test_f1_full': metrics_test['f1_full'],
+                })
 
-            self.lr_scheduler.step(metrics_all['e2e_val_f1_full'])
+            if self.selection_metric not in metrics_all:
+                raise KeyError(f'Unknown selection metric: {self.selection_metric!r}')
+            self.lr_scheduler.step(metrics_all[self.selection_metric])
 
             # log metrics
             # wandb.log(metrics_all)
 
-            if metrics_all['e2e_test_f1_full'] == 0:
+            if metrics_test is not None and metrics_all['e2e_test_f1_full'] == 0:
                 shutil.rmtree(self.save_dir)
                 raise RuntimeError('Zero metrics. Stopping the loop.')
 
             # save best model
-            if metrics_all['e2e_val_f1_span'] > best_metrics['e2e_val_f1_span']:
+            if metrics_all[self.selection_metric] > best_metrics[self.selection_metric]:
                 print(f'New best result! Saving the model for epoch {epoch}.')
                 best_metrics = metrics_all
                 self.best_epoch = epoch
@@ -272,7 +291,12 @@ class TrainingManager:
             scaler = torch.cuda.amp.GradScaler()
 
         # self._adjust_lr(epoch)
-        self.model.train()
+        if self.loss_mode == 'relation':
+            # Keep dropout and normalization in the frozen backbone deterministic.
+            self.model.eval()
+            self.model.label_classifier.train()
+        else:
+            self.model.train()
 
         pbar = tqdm(enumerate(batches), desc=f'Epoch {epoch + 1}/{self.epochs}', total=len(batches))
         for i, batch in pbar:
@@ -296,18 +320,21 @@ class TrainingManager:
                     batch_dataset_index)
 
             try:
-                loss = self._final_loss(*losses[:3],
-                                        label_loss_iter_list=label_loss_iter_list,
-                                        tree_loss_iter_list=tree_loss_iter_list,
-                                        edu_loss_iter_list=edu_loss_iter_list,
-                                        dwa_T=dwa_T)
+                if self.loss_mode == 'relation':
+                    loss = losses[1]
+                else:
+                    loss = self._final_loss(*losses[:3],
+                                            label_loss_iter_list=label_loss_iter_list,
+                                            tree_loss_iter_list=tree_loss_iter_list,
+                                            edu_loss_iter_list=edu_loss_iter_list,
+                                            dwa_T=dwa_T)
                 if self.model.use_discriminator:
                     loss += losses[3] * self.discriminator_alpha
             except OverflowError:
                 loss = torch.tensor(torch.inf)
 
-            label_loss_iter_list.append(losses[0])
-            tree_loss_iter_list.append(losses[1])
+            tree_loss_iter_list.append(losses[0])
+            label_loss_iter_list.append(losses[1])
             edu_loss_iter_list.append(losses[2])
 
             max_loss_memory = self.dwa_bs * 2
@@ -415,16 +442,29 @@ class TrainingManager:
         self.model.eval()
 
         dev_metrics_gs = self._eval_data(self.dev_data, desc='Validation', use_pred_segmentation=False)
-        test_metrics_gs = self._eval_data(self.test_data, desc='Testing', use_pred_segmentation=False)
         print(f"Dev metrics (gold segmentation): {dev_metrics_gs}")
-        print(f"Test metrics (gold segmentation): {test_metrics_gs}")
 
         dev_metrics = self._eval_data(self.dev_data, desc='Validation')
-        test_metrics = self._eval_data(self.test_data, desc='Testing')
         print(f"Dev metrics (end-to-end): {dev_metrics}")
-        print(f"Test metrics (end-to-end): {test_metrics}")
+        test_metrics = test_metrics_gs = None
+        if self.evaluate_test_each_epoch:
+            test_metrics_gs = self._eval_data(
+                self.test_data, desc='Testing', use_pred_segmentation=False)
+            test_metrics = self._eval_data(self.test_data, desc='Testing')
+            print(f"Test metrics (gold segmentation): {test_metrics_gs}")
+            print(f"Test metrics (end-to-end): {test_metrics}")
 
         return dev_metrics, test_metrics, dev_metrics_gs, test_metrics_gs
+
+    @torch.no_grad()
+    def evaluate_test(self):
+        """Evaluate the held-out test set explicitly, normally after training."""
+        self.model.eval()
+        return {
+            'gold_segmentation': self._eval_data(
+                self.test_data, desc='Testing', use_pred_segmentation=False),
+            'end_to_end': self._eval_data(self.test_data, desc='Testing'),
+        }
 
     def _eval_data(self, data, desc, use_pred_segmentation=True):
         """
@@ -542,7 +582,10 @@ class TrainingManager:
             all_data['relation_label'] += d.relation_label
             all_data['parsing_breaks'] += d.parsing_breaks
             all_data['golden_metric'] += d.golden_metric
-            all_data['dataset_index'] += [i for _ in range(len(d.input_sentences))]
+            if d.dataset_index is not None:
+                all_data['dataset_index'] += list(d.dataset_index)
+            else:
+                all_data['dataset_index'] += [i for _ in range(len(d.input_sentences))]
 
         return Data(**all_data)
 
@@ -681,8 +724,12 @@ class TrainingManager:
             - Evaluation metrics to 'metrics_epoch_{epoch}.json'.
         """
 
-        model_path = self.save_dir / 'best_weights.pt'
-        torch.save(self.model.state_dict(), model_path)
+        if self.checkpoint_scope == 'relation_head':
+            model_path = self.save_dir / 'best_relation_head.pt'
+            torch.save(self.model.label_classifier.state_dict(), model_path)
+        else:
+            model_path = self.save_dir / 'best_weights.pt'
+            torch.save(self.model.state_dict(), model_path)
 
         metric_path = self.save_dir / f'metrics_epoch_{epoch}.json'
         with open(metric_path, 'w') as f:

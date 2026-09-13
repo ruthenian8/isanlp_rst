@@ -15,9 +15,15 @@ class Parser:
                  hf_model_version: str = None,
                  relinventory: str = None,   # for universal parsers
                  relinventory_idx: int = 0,  # for universal parsers
+                 relation_head_dir: str = None,
                  cuda_device: int = -1):
 
-        if hf_model_version in self.DMRST_PARSERS:
+        if relation_head_dir is not None:
+            if model_dir is not None:
+                raise ValueError('model_dir and relation_head_dir cannot be used together')
+            self.predictor = PredictorUniRST.from_gum_fine_head(
+                relation_head_dir, cuda_device=cuda_device)
+        elif hf_model_version in self.DMRST_PARSERS:
             self.predictor = PredictorDMRST(
                 model_dir=model_dir,
                 hf_model_name=hf_model_name,

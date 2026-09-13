@@ -1,26 +1,36 @@
 import numpy as np
 
-# Fine-grained labels (51)
-# RelationTable = ['adversative-antithesis_NS', 'adversative-antithesis_SN', 'adversative-concession_NS',
-#                  'adversative-concession_SN', 'adversative-contrast_NN', 'attribution-negative_NS',
-#                  'attribution-negative_SN', 'attribution-positive_NS', 'attribution-positive_SN', 'causal-cause_NS',
-#                  'causal-cause_SN', 'causal-result_NS', 'causal-result_SN', 'context-background_NS',
-#                  'context-background_SN', 'context-circumstance_NS', 'context-circumstance_SN',
-#                  'contingency-condition_NS', 'contingency-condition_SN', 'elaboration-additional_NS',
-#                  'elaboration-attribute_NS', 'evaluation-comment_NS', 'evaluation-comment_SN',
-#                  'explanation-evidence_NS', 'explanation-evidence_SN', 'explanation-justify_NS',
-#                  'explanation-justify_SN', 'explanation-motivation_NS', 'explanation-motivation_SN',
-#                  'joint-disjunction_NN', 'joint-list_NN', 'joint-other_NN', 'joint-sequence_NN', 'mode-manner_NS',
-#                  'mode-manner_SN', 'mode-means_NS', 'mode-means_SN', 'organization-heading_SN',
-#                  'organization-phatic_NS', 'organization-phatic_SN', 'organization-preparation_SN',
-#                  'purpose-attribute_NS', 'purpose-goal_NS', 'purpose-goal_SN', 'restatement-partial_NS',
-#                  'restatement-partial_SN', 'restatement-repetition_NN', 'same-unit_NN', 'topic-question_SN',
-#                  'topic-solutionhood_NS', 'topic-solutionhood_SN']
+# Fine-grained labels observed in GUM V11.1.0 (50 relation/nuclearity
+# combinations over 32 semantic relations). Keep this order stable: relation
+# labels are serialized as integer positions in this table.
+RelationTableGUMFine = [
+    'adversative-antithesis_NS', 'adversative-antithesis_SN',
+    'adversative-concession_NS', 'adversative-concession_SN',
+    'adversative-contrast_NN', 'attribution-negative_NS',
+    'attribution-negative_SN', 'attribution-positive_NS',
+    'attribution-positive_SN', 'causal-cause_NS', 'causal-cause_SN',
+    'causal-result_NS', 'causal-result_SN', 'context-background_NS',
+    'context-background_SN', 'context-circumstance_NS',
+    'context-circumstance_SN', 'contingency-condition_NS',
+    'contingency-condition_SN', 'elaboration-additional_NS',
+    'elaboration-attribute_NS', 'evaluation-comment_NS',
+    'evaluation-comment_SN', 'explanation-evidence_NS',
+    'explanation-evidence_SN', 'explanation-justify_NS',
+    'explanation-justify_SN', 'explanation-motivation_NS',
+    'explanation-motivation_SN', 'joint-disjunction_NN', 'joint-list_NN',
+    'joint-other_NN', 'joint-sequence_NN', 'mode-manner_NS',
+    'mode-manner_SN', 'mode-means_NS', 'mode-means_SN',
+    'organization-heading_SN', 'organization-phatic_NS',
+    'organization-phatic_SN', 'organization-preparation_SN',
+    'purpose-attribute_NS', 'purpose-goal_NS', 'purpose-goal_SN',
+    'restatement-partial_NS', 'restatement-repetition_NN', 'same-unit_NN',
+    'topic-question_SN', 'topic-solutionhood_NS', 'topic-solutionhood_SN',
+]
 
-# Coarse-grained labels (29)
+# Coarse-grained labels published with the UniRST GUM inventory (27).
 RelationTableGUM = [
     'adversative_NN', 'adversative_NS', 'adversative_SN', 'attribution_NS', 'attribution_SN', 'causal_NS',
-    'causal_SN', 'context_NS', 'context_SN', 'contingency_NS', 'contingency_SN', 'elaboration_NS',
+    'causal_SN', 'context_NS', 'context_SN', 'condition_NS', 'condition_SN', 'elaboration_NS',
     'evaluation_NS', 'evaluation_SN', 'explanation_NS', 'explanation_SN', 'joint_NN', 'mode_NS', 'mode_SN',
     'organization_NS', 'organization_SN', 'purpose_NS', 'purpose_SN', 'restatement_NN', 'restatement_NS',
     'same-unit_NN', 'topic_SN']
