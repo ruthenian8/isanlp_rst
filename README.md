@@ -194,6 +194,15 @@ released UniRST model. It predicts the 50 relation/nuclearity combinations
 observed in GUM V11.1 instead of UniRST's collapsed GUM labels. The encoder,
 tree parser, and GUM segmenter remain frozen.
 
+In a fresh checkout or Colab runtime, install the project dependencies first.
+`isanlp` is hosted on GitHub rather than PyPI and must be installed separately
+for RST-tree inference:
+
+```bash
+pip install git+https://github.com/iinemo/isanlp.git
+pip install -e .
+```
+
 The expected data layout is:
 
 ```text

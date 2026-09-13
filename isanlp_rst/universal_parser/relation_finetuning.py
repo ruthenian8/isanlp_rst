@@ -93,6 +93,12 @@ def replace_with_gum_fine_head(model, fine_labels: Iterable[str] = RelationTable
     # Retain the released dataset indices so GUM continues to select segmenter
     # 1, while routing every dataset index to this single relation classifier.
     model.dataset2classifier = [0 for _ in model.segmenters]
+    # Parsing losses index these weights by dataset index. Older masked-union
+    # models incorrectly initialized this list from the number of classifiers
+    # (one) rather than the number of dataset routes.
+    model.corpora_weights = [1.0 for _ in model.dataset2classifier]
+    if hasattr(model, 'encoder'):
+        model.encoder.corpora_weights = model.corpora_weights
     return target
 
 

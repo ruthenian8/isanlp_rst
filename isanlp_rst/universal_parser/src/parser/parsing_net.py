@@ -92,7 +92,16 @@ class ParsingNet(nn.Module):
         self.dataset2classifier = dataset2classifier
 
         if not corpora_weights:
-            corpora_weights = [1. for _ in range(len(classes_numbers))]
+            # Weights are indexed by the original dataset index, not by the
+            # classifier index. Masked-union models have one shared classifier
+            # but retain one route (and segmenter) per corpus.
+            corpora_weights = [1. for _ in range(len(self.dataset2classifier))]
+        elif len(corpora_weights) != len(self.dataset2classifier):
+            raise ValueError(
+                'corpora_weights must contain one value per dataset route: '
+                f'got {len(corpora_weights)} weights for '
+                f'{len(self.dataset2classifier)} routes'
+            )
         self.corpora_weights = corpora_weights
 
         if separated_segmentation:
@@ -800,4 +809,3 @@ class ParsingNet(nn.Module):
         metrics = get_batch_metrics(span_batch, batch_golden_metrics,
                                     predict_edu_breaks, batch_edu_breaks, use_org_parseval)
         return (loss_tree_batch, loss_label_batch), metrics
-

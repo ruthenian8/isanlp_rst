@@ -10,17 +10,30 @@ import types
 from bisect import bisect_right
 from huggingface_hub import hf_hub_download
 from importlib import import_module
-from isanlp.annotation import Token
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, AutoConfig
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from isanlp_rst.base_predictor import BasePredictor
-from isanlp_rst.utils.du_converter import DUConverter
 from .data_manager import DataManager  # noqa: F401 - ensure module is registered for pickle
 from .src.parser.data import Data
 from .src.parser.parsing_net import ParsingNet
 from .src.parser.parsing_net_bottom_up import ParsingNetBottomUp
+
+
+def _du_converter():
+    """Import inference-only isanlp structures without burdening training."""
+
+    try:
+        from isanlp_rst.utils.du_converter import DUConverter
+    except ModuleNotFoundError as error:
+        if error.name and error.name.startswith('isanlp'):
+            raise ModuleNotFoundError(
+                'RST-tree inference requires isanlp. Install it with '
+                '`pip install git+https://github.com/iinemo/isanlp.git`.'
+            ) from error
+        raise
+    return DUConverter
 
 
 def str2bool(value):
@@ -660,6 +673,7 @@ class PredictorUniRST(BasePredictor):
             A dictionary with token annotations and the predicted RST tree.
         """
 
+        DUConverter = _du_converter()
         if text is None:
             raise ValueError('`text` must be provided for parsing.')
 
@@ -740,6 +754,7 @@ class PredictorUniRST(BasePredictor):
     def parse_from_edus(self, edus: Sequence[str]) -> dict:
         """Parse text using predefined EDU boundaries."""
 
+        DUConverter = _du_converter()
         normalized_edus = self._validate_edus(edus)
         text, spans = self._compute_edu_char_spans(normalized_edus)
 
