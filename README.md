@@ -224,6 +224,7 @@ python -m isanlp_rst.universal_parser.finetune_gum_relations \
   --cuda_device=0 \
   --batch_size=1 \
   --epochs=20 \
+  --fine_tune_scope=relation_head \
   --class_weight_power=0.5 \
   --class_weight_smoothing=1.0
 ```
@@ -240,22 +241,38 @@ which upweights rare relations without the extreme weights produced by raw
 inverse frequency. Set `--class_weight_power=0` to disable frequency weighting.
 The counts and final weights are recorded in the run's `config.json`.
 
+By default, only the relation head is trainable. To fine-tune the complete
+model with the combined tree, class-weighted relation, and segmentation loss,
+use:
+
+```bash
+python -m isanlp_rst.universal_parser.finetune_gum_relations \
+  --fine_tune_scope=all \
+  --transformer_lr_multiplier=0.1 \
+  --cuda_device=0
+```
+
+`transformer_lr_multiplier` scales the encoder-transformer's learning rate
+relative to `--lr`. Full-model runs save `best_weights.pt`; head-only runs save
+`best_relation_head.pt`. `Parser(relation_head_dir=...)` recognizes and loads
+both formats from the recorded `fine_tune_scope` automatically.
+
 Checkpoints are selected using relation F1 on the validation split with gold
 EDU boundaries. The held-out test split is evaluated only once, after the best
 validation checkpoint is restored. The run directory contains:
 
 ```text
 saves/gum_v11_1_fine_relations/
-├── best_relation_head.pt
+├── best_relation_head.pt  # head-only mode; best_weights.pt in full-model mode
 ├── config.json
 ├── relation_table_eng.erst.gum.txt
 ├── best_metrics.json
 └── test_metrics.json
 ```
 
-Keep the first three files together: inference uses `config.json` to reload the
-exact pinned UniRST base revision and validates the relation inventory before
-installing the fine-tuned head.
+Keep the checkpoint, `config.json`, and relation-table file together. Inference
+uses `config.json` to reload the exact pinned UniRST base revision and validates
+the relation inventory before installing the fine-tuned parameters.
 
 ```python
 from isanlp_rst.parser import Parser

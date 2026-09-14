@@ -150,9 +150,8 @@ class PredictorUniRST(BasePredictor):
 
         artifact_dir = os.path.abspath(os.path.expanduser(artifact_dir))
         config_path = os.path.join(artifact_dir, 'config.json')
-        head_path = os.path.join(artifact_dir, 'best_relation_head.pt')
         inventory_path = os.path.join(artifact_dir, 'relation_table_eng.erst.gum.txt')
-        for required_path in (config_path, head_path, inventory_path):
+        for required_path in (config_path, inventory_path):
             if not os.path.isfile(required_path):
                 raise FileNotFoundError(f'Missing fine-head artifact file: {required_path}')
 
@@ -164,6 +163,17 @@ class PredictorUniRST(BasePredictor):
         revision = metadata.get('base_revision')
         if not model_name or not revision:
             raise ValueError('Fine-head metadata must pin base_model and base_revision')
+
+        fine_tune_scope = metadata.get('fine_tune_scope', 'relation_head')
+        if fine_tune_scope not in {'relation_head', 'all'}:
+            raise ValueError(f'Unsupported fine_tune_scope: {fine_tune_scope!r}')
+        checkpoint_name = (
+            'best_relation_head.pt' if fine_tune_scope == 'relation_head'
+            else 'best_weights.pt'
+        )
+        checkpoint_path = os.path.join(artifact_dir, checkpoint_name)
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(f'Missing fine-tuning checkpoint: {checkpoint_path}')
 
         from .relation_finetuning import load_gum_fine_head
         from .src.parser.data import RelationTableGUMFine
@@ -182,8 +192,16 @@ class PredictorUniRST(BasePredictor):
             relinventory='eng.erst.gum',
             cuda_device=cuda_device,
         )
-        load_gum_fine_head(
-            predictor.model, head_path, map_location=predictor._cuda_device)
+        if fine_tune_scope == 'relation_head':
+            load_gum_fine_head(
+                predictor.model, checkpoint_path,
+                map_location=predictor._cuda_device)
+        else:
+            from .relation_finetuning import replace_with_gum_fine_head
+            replace_with_gum_fine_head(predictor.model)
+            predictor.model.load_state_dict(torch.load(
+                checkpoint_path, map_location=predictor._cuda_device,
+                weights_only=True))
         predictor.label_maps = None
         predictor.model.eval()
         predictor.fine_head_metadata = metadata

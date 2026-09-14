@@ -95,8 +95,13 @@ def train(
     use_amp=False,
     class_weight_power=0.5,
     class_weight_smoothing=1.0,
+    fine_tune_scope='relation_head',
+    transformer_lr_multiplier=0.1,
 ):
-    """Train only the 50-way GUM relation classifier and test once at the end."""
+    """Fine-tune UniRST with a 50-way GUM relation inventory."""
+
+    if fine_tune_scope not in {'relation_head', 'all'}:
+        raise ValueError("fine_tune_scope must be either 'relation_head' or 'all'")
 
     random.seed(seed)
     np.random.seed(seed)
@@ -116,7 +121,10 @@ def train(
         cuda_device=cuda_device,
     )
     replace_with_gum_fine_head(predictor.model)
-    freeze_except_relation_head(predictor.model)
+    if fine_tune_scope == 'relation_head':
+        freeze_except_relation_head(predictor.model)
+    else:
+        predictor.model.requires_grad_(True)
     # Source labels already index RelationTableGUMFine; do not remap them into
     # the released union vocabulary. Tokenization retains GUM dataset index 1.
     predictor.label_maps = None
@@ -145,6 +153,8 @@ def train(
         'test_policy': 'evaluated once after validation-selected training',
         'seed': seed,
         'artifact_format': 1,
+        'fine_tune_scope': fine_tune_scope,
+        'training_objective': 'relation' if fine_tune_scope == 'relation_head' else 'tree+relation+segmentation',
         'class_weighting': {
             'formula': '(count + smoothing) ** (-power), normalized to mean 1',
             'power': class_weight_power,
@@ -156,23 +166,32 @@ def train(
     trainer = TrainingManager(
         predictor.model, [train_data], [dev_data], [test_data],
         batch_size=batch_size, eval_size=eval_size, epochs=epochs,
-        lr=lr, transformer_lr_multiplier=0, lr_decay_epoch=1000, lr_decay=1.0,
+        lr=lr,
+        transformer_lr_multiplier=(
+            transformer_lr_multiplier if fine_tune_scope == 'all' else 0),
+        lr_decay_epoch=1000, lr_decay=1.0,
         weight_decay=weight_decay, grad_norm=grad_norm,
         grad_clipping_value=grad_clipping_value, patience=patience,
         use_micro_f1=True, use_dwa_loss=False, dwa_bs=max(batch_size, 1),
         save_dir=save_dir, use_amp=use_amp, run_name=run_name, config=provenance,
-        loss_mode='relation', selection_metric='gs_val_f1_rel',
-        evaluate_test_each_epoch=False, checkpoint_scope='relation_head',
+        loss_mode='relation' if fine_tune_scope == 'relation_head' else 'all',
+        selection_metric='gs_val_f1_rel', evaluate_test_each_epoch=False,
+        checkpoint_scope='relation_head' if fine_tune_scope == 'relation_head' else 'full',
     )
     run_dir = trainer.save_dir
     (run_dir / 'relation_table_eng.erst.gum.txt').write_text(
         '\n'.join(RelationTableGUMFine) + '\n', encoding='utf8')
 
     best_metrics = trainer.train()
-    head_path = run_dir / 'best_relation_head.pt'
-    predictor.model.label_classifier.load_state_dict(
-        torch.load(head_path, map_location=predictor._cuda_device, weights_only=True)
-    )
+    if fine_tune_scope == 'relation_head':
+        head_path = run_dir / 'best_relation_head.pt'
+        predictor.model.label_classifier.load_state_dict(
+            torch.load(head_path, map_location=predictor._cuda_device, weights_only=True)
+        )
+    else:
+        predictor.model.load_state_dict(torch.load(
+            run_dir / 'best_weights.pt', map_location=predictor._cuda_device,
+            weights_only=True))
     test_metrics = trainer.evaluate_test()
     with (run_dir / 'test_metrics.json').open('w', encoding='utf8') as stream:
         json.dump(test_metrics, stream, indent=2, sort_keys=True, default=float)
