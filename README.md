@@ -223,13 +223,22 @@ python -m isanlp_rst.universal_parser.finetune_gum_relations \
   --run_name=gum_v11_1_fine_relations \
   --cuda_device=0 \
   --batch_size=1 \
-  --epochs=20
+  --epochs=20 \
+  --class_weight_power=0.5 \
+  --class_weight_smoothing=1.0
 ```
 
 If the manager cache does not exist, the command prepares the RS3 documents
 and creates it. If it does exist, its serialized paths are rebased to
 `--data_root`; the command stops with an error if that root does not contain
 prepared GUM documents. Use `--cuda_device=-1` for CPU execution.
+
+Relation loss is class-frequency weighted using
+`(count + smoothing) ** (-power)`, normalized to mean weight 1. The defaults
+use inverse square-root frequency (`power=0.5`) with additive smoothing of 1,
+which upweights rare relations without the extreme weights produced by raw
+inverse frequency. Set `--class_weight_power=0` to disable frequency weighting.
+The counts and final weights are recorded in the run's `config.json`.
 
 Checkpoints are selected using relation F1 on the validation split with gold
 EDU boundaries. The held-out test split is evaluated only once, after the best

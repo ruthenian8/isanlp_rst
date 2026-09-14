@@ -51,7 +51,18 @@ def _load_data_manager(path, data_root):
     return manager
 
 
-def _class_weights(data, classes, device):
+def _class_weights(data, classes, device, power=0.5, smoothing=1.0):
+    """Return mean-one inverse-frequency weights and their raw counts.
+
+    ``power=0.5`` uses inverse square-root frequency, which is less aggressive
+    than inverse frequency. ``smoothing`` is added to every class count before
+    exponentiation and further limits weights for very rare classes.
+    """
+
+    if power < 0:
+        raise ValueError('class_weight_power must be non-negative')
+    if smoothing < 0:
+        raise ValueError('class_weight_smoothing must be non-negative')
     counts = np.bincount(
         [label for document in data.relation_label for label in document],
         minlength=classes,
@@ -59,9 +70,9 @@ def _class_weights(data, classes, device):
     if np.any(counts == 0):
         missing = np.flatnonzero(counts == 0).tolist()
         raise ValueError(f'Training split has no examples for relation classes {missing}')
-    weights = 1.0 / np.sqrt(counts.astype(np.float64))
+    weights = np.power(counts.astype(np.float64) + smoothing, -power)
     weights /= weights.mean()
-    return torch.tensor(weights, dtype=torch.float32, device=device)
+    return torch.tensor(weights, dtype=torch.float32, device=device), counts
 
 
 def train(
@@ -82,6 +93,8 @@ def train(
     grad_clipping_value=10.0,
     seed=42,
     use_amp=False,
+    class_weight_power=0.5,
+    class_weight_smoothing=1.0,
 ):
     """Train only the 50-way GUM relation classifier and test once at the end."""
 
@@ -111,9 +124,16 @@ def train(
     train_data = predictor.tokenize(train_data)
     dev_data = predictor.tokenize(dev_data)
     test_data = predictor.tokenize(test_data)
-    predictor.model.label_weights = [
-        _class_weights(train_data, len(RelationTableGUMFine), predictor._cuda_device)
-    ]
+    relation_weights, relation_counts = _class_weights(
+        train_data,
+        len(RelationTableGUMFine),
+        predictor._cuda_device,
+        power=class_weight_power,
+        smoothing=class_weight_smoothing,
+    )
+    # ParsingNet constructs NLLLoss(weight=...) from this list, so these
+    # weights directly scale every fine-relation classification loss.
+    predictor.model.label_weights = [relation_weights]
 
     provenance = {
         'task': 'gum_fine_relation_head',
@@ -125,6 +145,13 @@ def train(
         'test_policy': 'evaluated once after validation-selected training',
         'seed': seed,
         'artifact_format': 1,
+        'class_weighting': {
+            'formula': '(count + smoothing) ** (-power), normalized to mean 1',
+            'power': class_weight_power,
+            'smoothing': class_weight_smoothing,
+            'counts': relation_counts.tolist(),
+            'weights': relation_weights.detach().cpu().tolist(),
+        },
     }
     trainer = TrainingManager(
         predictor.model, [train_data], [dev_data], [test_data],
