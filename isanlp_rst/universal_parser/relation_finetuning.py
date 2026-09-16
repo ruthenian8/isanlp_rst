@@ -1,6 +1,6 @@
 """Utilities for adapting a released UniRST relation head."""
 
-from typing import Dict, Iterable
+from typing import Dict, Iterable, List
 
 import torch
 
@@ -91,6 +91,40 @@ def _copy_output_row(source, target, source_index: int, target_index: int) -> No
         )
 
 
+def _copy_mean_output_row(
+    source, target, source_indices: List[int], target_index: int
+) -> None:
+    """Initialize a missing nuclearity row from the same existing relation."""
+
+    for attribute in ('weight_left', 'weight_right', 'weight_bilateral'):
+        source_layer = getattr(source, attribute)
+        target_layer = getattr(target, attribute)
+        target_layer.weight[target_index].copy_(
+            source_layer.weight[source_indices].mean(dim=0)
+        )
+    if source.weight_bilateral.bias is not None:
+        target.weight_bilateral.bias[target_index].copy_(
+            source.weight_bilateral.bias[source_indices].mean(dim=0)
+        )
+
+
+def _source_rows_for_label(label: str, source_vocab: Dict[str, int]) -> List[int]:
+    """Resolve an exact row, or rows for the same relation across nuclearities."""
+
+    normalized = label.lower()
+    if normalized in source_vocab:
+        return [source_vocab[normalized]]
+
+    relation, separator, nuclearity = normalized.rpartition('_')
+    if separator == '' or nuclearity not in {'nn', 'ns', 'sn'}:
+        return []
+    return [
+        source_vocab[candidate]
+        for candidate in (f'{relation}_nn', f'{relation}_ns', f'{relation}_sn')
+        if candidate in source_vocab
+    ]
+
+
 def _replace_with_fine_head(model, fine_labels, coarse_label):
     """Replace a released masked-union head and initialize rows from coarse labels.
 
@@ -107,13 +141,16 @@ def _replace_with_fine_head(model, fine_labels, coarse_label):
     source_vocab: Dict[str, int] = {
         label.lower(): index for index, label in enumerate(model.relation_vocab)
     }
-    missing = sorted({
-        coarse_label(label)
+    source_rows = {
+        label: _source_rows_for_label(coarse_label(label), source_vocab)
         for label in fine_labels
-        if coarse_label(label) not in source_vocab
-    })
+    }
+    missing = sorted({coarse_label(label) for label in fine_labels if not source_rows[label]})
     if missing:
-        raise ValueError(f'Released checkpoint is missing coarse rows: {missing}')
+        raise ValueError(
+            'Released checkpoint has no rows for these coarse relations: '
+            f'{missing}'
+        )
 
     device = source.labelspace_left.weight.device
     target = DefaultLabelClassifier(
@@ -129,8 +166,11 @@ def _replace_with_fine_head(model, fine_labels, coarse_label):
         target.labelspace_left.weight.copy_(source.labelspace_left.weight)
         target.labelspace_right.weight.copy_(source.labelspace_right.weight)
         for target_index, label in enumerate(fine_labels):
-            source_index = source_vocab[coarse_label(label)]
-            _copy_output_row(source, target, source_index, target_index)
+            indices = source_rows[label]
+            if len(indices) == 1:
+                _copy_output_row(source, target, indices[0], target_index)
+            else:
+                _copy_mean_output_row(source, target, indices, target_index)
 
     model.label_classifier = target
     model.relation_vocab = [label.lower() for label in fine_labels]
