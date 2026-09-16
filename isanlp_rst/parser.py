@@ -21,7 +21,7 @@ class Parser:
         if relation_head_dir is not None:
             if model_dir is not None:
                 raise ValueError('model_dir and relation_head_dir cannot be used together')
-            self.predictor = PredictorUniRST.from_gum_fine_head(
+            self.predictor = PredictorUniRST.from_fine_relation_head(
                 relation_head_dir, cuda_device=cuda_device)
         elif hf_model_version in self.DMRST_PARSERS:
             self.predictor = PredictorDMRST(

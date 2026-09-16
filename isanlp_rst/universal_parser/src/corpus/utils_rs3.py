@@ -789,4 +789,3 @@ def printTreeRS3(tree):
             print("-->", n._id, n.relation.encode('utf8'), n.eduspan, n.prop, [m._id for m in n.nodelist])
         for m in n.nodelist:
             queue.append(m)
-

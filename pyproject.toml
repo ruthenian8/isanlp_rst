@@ -29,6 +29,7 @@ dependencies = [
   "tqdm",
   "networkx",
   "pillow",
+  "rstconverter==2021.10.7",
 ]
 
 [tool.setuptools.packages.find]

@@ -48,6 +48,46 @@ RelationTableRSTDT = ['Elaboration_NS', 'Attribution_SN', 'Joint_NN', 'same-unit
        'Summary_SN', 'Condition_NN', 'Topic-Comment_SN', 'Topic-Change_NS',
        'Evaluation_NN', 'Explanation_NN']
 
+# Native RST-DT relations after merging the annotation-only -n/-e/-s suffixes
+# and marking multinuclear relations with -mn. These are the 110
+# relation/nuclearity combinations observed in the complete TRAINING split.
+_RSTDT_FINE_MULTINUC = (
+    'analogy-mn', 'cause-result-mn', 'comment-topic-mn', 'comparison-mn',
+    'consequence-mn', 'contrast-mn', 'disjunction-mn', 'evaluation-mn',
+    'interpretation-mn', 'inverted-sequence-mn', 'list-mn', 'otherwise-mn',
+    'problem-solution-mn', 'proportion-mn', 'question-answer-mn', 'reason-mn',
+    'same-unit-mn', 'sequence-mn', 'statement-response-mn',
+    'temporal-same-time-mn', 'textual-organization-mn', 'topic-comment-mn',
+    'topic-drift-mn', 'topic-shift-mn',
+)
+_RSTDT_FINE_RST = (
+    'analogy', 'antithesis', 'attribution', 'background', 'cause',
+    'circumstance', 'comment', 'comparison', 'concession', 'conclusion',
+    'condition', 'consequence', 'contingency', 'definition',
+    'elaboration-additional', 'elaboration-general-specific',
+    'elaboration-object-attribute', 'elaboration-part-whole',
+    'elaboration-process-step', 'elaboration-set-member', 'enablement',
+    'evaluation', 'evidence', 'example', 'explanation-argumentative',
+    'hypothetical', 'interpretation', 'manner', 'means', 'otherwise',
+    'preference', 'problem-solution', 'purpose', 'question-answer', 'reason',
+    'restatement', 'result', 'rhetorical-question', 'statement-response',
+    'summary', 'temporal-after', 'temporal-before', 'temporal-same-time',
+    'topic-drift', 'topic-shift',
+)
+_RSTDT_FINE_NS_ONLY = {
+    'definition', 'elaboration-process-step', 'topic-drift', 'topic-shift',
+}
+RelationTableRSTDTFine = (
+    [f'{relation}_NN' for relation in _RSTDT_FINE_MULTINUC]
+    + [
+        f'{relation}_{nuclearity}'
+        for relation in _RSTDT_FINE_RST
+        for nuclearity in (
+            ('NS',) if relation in _RSTDT_FINE_NS_ONLY else ('NS', 'SN')
+        )
+    ]
+)
+
 RelationTableRuRSTB = ['Joint_NN', 'Elaboration_NS', 'Contrast_NN', 'Attribution_SN', 'Interpretation-evaluation_NS',
                        'Preparation_SN', 'Cause-effect_SN', 'Sequence_NN', 'Cause-effect_NS',
                        'same-unit_NN', 'Condition_SN', 'Purpose_NS', 'Attribution_NS', 'Condition_NS',

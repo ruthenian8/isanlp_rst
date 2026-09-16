@@ -13,6 +13,7 @@ This library provides several versions of the Rhetorical Structure (RST) parser 
   * [Visualizing the RST Tree](#visualizing-the-rst-tree)
   * [Advanced Usage](#advanced-usage)
     * [Fine-Tuning UniRST on Native GUM Relations](#fine-tuning-unirst-on-native-gum-relations)
+    * [Fine-Tuning UniRST on Native RST-DT Relations](#fine-tuning-unirst-on-native-rst-dt-relations)
   * [Docker Setup](#docker-setup)
   * [Citation](#citation)
 
@@ -257,6 +258,12 @@ relative to `--lr`. Full-model runs save `best_weights.pt`; head-only runs save
 `best_relation_head.pt`. `Parser(relation_head_dir=...)` recognizes and loads
 both formats from the recorded `fine_tune_scope` automatically.
 
+Dropout can be overridden with `--classifier_dropout`,
+`--transformer_dropout`, and `--segmenter_dropout`. Hyperparameter sweeps use
+`--evaluate_test_after_training=False`, which leaves the held-out test set
+untouched and omits `test_metrics.json`; ordinary training defaults to one test
+evaluation after restoring the validation-selected checkpoint.
+
 Checkpoints are selected using relation F1 on the validation split with gold
 EDU boundaries. The held-out test split is evaluated only once, after the best
 validation checkpoint is restored. The run directory contains:
@@ -295,6 +302,69 @@ result_from_edus = parser.from_edus([
 Relations in the returned RST tree use native GUM V11.1 names such as
 `causal-result` and `contingency-condition`, together with their predicted
 nuclearity.
+
+### Fine-Tuning UniRST on Native RST-DT Relations
+
+The RST-DT workflow uses the converted corpus in `data/rstdt_rs3_merged`.
+Annotation-only `-n`, `-e`, and `-s` variants are merged, while multinuclear
+relations use an explicit `-mn` suffix. The resulting fixed inventory contains
+110 observed relation/nuclearity classes over 69 relations.
+
+Expected input layout:
+
+```text
+data/rstdt_rs3_merged/
+├── TRAINING/*.rs3
+└── TEST/*.rs3
+data/rstdt_file_lists/
+├── files.train
+├── files.dev
+└── files.test
+```
+
+Run fine-tuning from the repository root:
+
+```bash
+python -m isanlp_rst.universal_parser.finetune_rstdt_relations \
+  --data_root=data \
+  --data_manager_path=data/data_manager_rstdt_fine.pickle \
+  --save_dir=saves \
+  --run_name=rstdt_merged_fine_relations \
+  --cuda_device=0 \
+  --batch_size=1 \
+  --epochs=20 \
+  --fine_tune_scope=relation_head \
+  --class_weight_power=0.5 \
+  --class_weight_smoothing=1.0
+```
+
+On the first run, the command converts every RS3 document into parser input
+under `data/rstdt_fine_prepared` and creates the manager cache. Development
+documents follow the fixed
+[DISRPT 2025 RST-DT partition](https://github.com/disrpt/sharedtask2025/blob/master/data/eng.rst.rstdt/eng.rst.rstdt_partition.json):
+309 train, 38 development, and 38 test documents. The loader validates that
+these lists are disjoint and exactly cover the converted corpus. The official
+test split is held out until the validation-selected checkpoint is restored;
+development data is not added to training.
+
+The same class weighting and `--fine_tune_scope=all` configuration described
+for GUM are supported. RST-DT artifacts contain
+`relation_table_eng.rst.rstdt.txt` and can be loaded through the same public
+interface:
+
+```python
+from isanlp_rst.parser import Parser
+
+parser = Parser(
+    relation_head_dir='saves/rstdt_merged_fine_relations',
+    cuda_device=0,
+)
+result = parser('A document to parse.')
+```
+
+Returned relation names retain the merged native labels, such as
+`elaboration-object-attribute`, while multinuclear predictions are explicit,
+for example `cause-result-mn` and `same-unit-mn`.
 
 ### Parsing Pre-Segmented EDUs
 

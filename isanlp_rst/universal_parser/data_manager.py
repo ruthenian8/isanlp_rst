@@ -16,6 +16,7 @@ from isanlp_rst.universal_parser.src.parser.data import (
     RelationTableGUM,
     RelationTableGUMFine,
     RelationTableRSTDT,
+    RelationTableRSTDTFine,
     RelationTableRuRSTB,
 )
 
@@ -53,9 +54,9 @@ class DataManager:
                 "relation_granularity must be either 'coarse' or 'fine', "
                 f'got {relation_granularity!r}'
             )
-        if relation_granularity == 'fine' and corpus not in {'GUM', 'GUM10-tr'}:
+        if relation_granularity == 'fine' and corpus not in {'GUM', 'GUM10-tr', 'RST-DT'}:
             raise NotImplementedError(
-                'Fine-grained relation loading is currently implemented only for GUM'
+                'Fine-grained relation loading is implemented only for GUM and RST-DT'
             )
 
         self.corpus_name = corpus
@@ -136,15 +137,26 @@ class DataManager:
             self.input_path = self.data_root / 'rstdt_tr_rs3'
             self.output_path = self.data_root / 'rstdt_tr_prepared'
         else:
-            self.input_path = self.data_root / 'rstdt_rs3'
-            self.output_path = self.data_root / 'rstdt_prepared'
+            if self.relation_granularity == 'fine':
+                self.input_path = self.data_root / 'rstdt_rs3_merged'
+                self.output_path = self.data_root / 'rstdt_fine_prepared'
+            else:
+                self.input_path = self.data_root / 'rstdt_rs3'
+                self.output_path = self.data_root / 'rstdt_prepared'
 
         self.output_path.mkdir(parents=True, exist_ok=True)
 
         # There is no fixed validation part in RST-DT,
         # so we'll take random parts of training for validation for each "fold"
-        self.nfolds = nfolds
-        self.folds = defaultdict(dict)
+        if self.relation_granularity == 'fine':
+            self.corpus = dict()
+            self.split_source = (
+                'https://github.com/disrpt/sharedtask2025/blob/master/data/'
+                'eng.rst.rstdt/eng.rst.rstdt_partition.json'
+            )
+        else:
+            self.nfolds = nfolds
+            self.folds = defaultdict(dict)
 
         class2rel = {
             'Attribution': ['attribution', 'attribution-e', 'attribution-n', 'attribution-negative'],
@@ -193,8 +205,12 @@ class DataManager:
             for rel in class2rel[cl]:
                 self.rel2class[rel] = cl
 
-        self.relation_table = RelationTableRSTDT
-        self.relation_dic = {word.lower(): i for i, word in enumerate(RelationTableRSTDT)}
+        self.relation_table = (
+            RelationTableRSTDTFine
+            if self.relation_granularity == 'fine'
+            else RelationTableRSTDT
+        )
+        self.relation_dic = {word.lower(): i for i, word in enumerate(self.relation_table)}
         self.relation_fixer = dict()
 
     def _init_rurstb_corpus(self):
@@ -301,9 +317,13 @@ class DataManager:
         elif self.corpus_name == 'RST-DT':
             for part in ('TRAINING', 'TEST'):
                 for rs3_file in sorted(glob.glob(os.path.join(self.input_path, part, '*.rs3'))):
-                    self.convert_doc(filename=os.path.basename(rs3_file),
-                                     input_dir=os.path.join(self.input_path, part),
-                                     output_dir=self.output_path)
+                    if self.relation_granularity == 'fine':
+                        from isanlp_rst.universal_parser.rstdt_rs3 import convert_rs3_document
+                        convert_rs3_document(rs3_file, self.output_path)
+                    else:
+                        self.convert_doc(filename=os.path.basename(rs3_file),
+                                         input_dir=os.path.join(self.input_path, part),
+                                         output_dir=self.output_path)
 
         elif self.corpus_name == 'RST-DT-tr':
             for rs3_file in sorted(glob.glob(os.path.join(self.input_path, '*.rs3'))):
@@ -325,7 +345,16 @@ class DataManager:
                     raise e
 
     def prepare_parser_format(self):
-        files = list(self.output_path.glob('*.edus'))
+        if self.corpus_name == 'RST-DT' and self.relation_granularity == 'fine':
+            files = []
+            for part in ('TRAINING', 'TEST'):
+                for source in sorted((self.input_path / part).glob('*.rs3')):
+                    name = source.name[:-4]
+                    if name.endswith('.out'):
+                        name = name[:-4]
+                    files.append(self.output_path / f'{name}.edus')
+        else:
+            files = list(self.output_path.glob('*.edus'))
         for edu_path in tqdm(files, desc='Reading *.lisp files'):
             lisp_path = edu_path.parent.joinpath(edu_path.name[:-5] + '.lisp')
             try:
@@ -454,19 +483,27 @@ class DataManager:
             self.corpus['test'] = []
 
         elif self.corpus_name == 'RST-DT':
-            test_files = [os.path.basename(filename)[:-4]
-                          for filename in glob.glob(os.path.join(self.input_path, 'TEST', '*.rs3'))]
-            all_train_files = [os.path.basename(filename)[:-4]
-                               for filename in glob.glob(os.path.join(self.input_path, 'TRAINING', '*.rs3'))]
+            if self.relation_granularity == 'fine':
+                list_root = self.data_root / 'rstdt_file_lists'
+                self.corpus = {
+                    part: (list_root / f'files.{part}').read_text(
+                        encoding='utf8').splitlines()
+                    for part in ('train', 'dev', 'test')
+                }
+                self._validate_rstdt_partitions()
+            else:
+                test_files = [os.path.basename(filename)[:-4]
+                              for filename in glob.glob(os.path.join(self.input_path, 'TEST', '*.rs3'))]
+                all_train_files = [os.path.basename(filename)[:-4]
+                                   for filename in glob.glob(os.path.join(self.input_path, 'TRAINING', '*.rs3'))]
 
-            for fold in range(self.nfolds):
-                train_n = int(len(all_train_files) * 0.9)
-                train_files = random.sample(all_train_files, train_n)
-                dev_files = [file for file in all_train_files if not file in train_files]
-
-                self.folds[fold]['train'] = train_files
-                self.folds[fold]['dev'] = dev_files
-                self.folds[fold]['test'] = test_files
+                for fold in range(self.nfolds):
+                    train_n = int(len(all_train_files) * 0.9)
+                    train_files = random.sample(all_train_files, train_n)
+                    dev_files = [file for file in all_train_files if file not in train_files]
+                    self.folds[fold]['train'] = train_files
+                    self.folds[fold]['dev'] = dev_files
+                    self.folds[fold]['test'] = test_files
 
         elif self.corpus_name == 'RST-DT-tr':
             all_train_files = [os.path.basename(filename)[:-4]
@@ -482,6 +519,36 @@ class DataManager:
                 clear_filename = os.path.basename(filename)[:-4]
                 part = clear_filename.split('.')[0]
                 self.corpus[part].append(clear_filename)
+
+    def _validate_rstdt_partitions(self):
+        """Ensure DISRPT IDs exactly partition the converted RST-DT corpus."""
+
+        def source_ids(directory):
+            result = set()
+            for path in directory.glob('*.rs3'):
+                name = path.name[:-4]
+                result.add(name[:-4] if name.endswith('.out') else name)
+            return result
+
+        split_sets = {part: set(names) for part, names in self.corpus.items()}
+        for part, names in self.corpus.items():
+            if len(names) != len(split_sets[part]):
+                raise ValueError(f'Duplicate document IDs in RST-DT {part} list')
+        if any(split_sets[left] & split_sets[right] for left, right in (
+            ('train', 'dev'), ('train', 'test'), ('dev', 'test')
+        )):
+            raise ValueError('RST-DT train/dev/test document lists overlap')
+
+        training_sources = source_ids(self.input_path / 'TRAINING')
+        test_sources = source_ids(self.input_path / 'TEST')
+        expected_training = split_sets['train'] | split_sets['dev']
+        if expected_training != training_sources or split_sets['test'] != test_sources:
+            missing = (expected_training - training_sources) | (split_sets['test'] - test_sources)
+            extra = (training_sources - expected_training) | (test_sources - split_sets['test'])
+            raise ValueError(
+                'DISRPT 2025 RST-DT lists do not match converted RS3 files; '
+                f'missing={sorted(missing)}, extra={sorted(extra)}'
+            )
 
     def _collect_mixed_train(self, train_data, genres: list, n: int, another_lang: str):
         mixed_train = train_data[:]
@@ -631,7 +698,7 @@ class DataManager:
                 if self.corpus_name in ('GUM', 'GUM10-tr'):
                     if self.relation_granularity == 'coarse' and relation != 'same-unit':
                         relation = relation.split('-')[0]
-                elif self.corpus_name in ['RST-DT', 'RuRSTB', 'RST-DT-tr']:
+                elif self.corpus_name in ['RST-DT', 'RuRSTB', 'RST-DT-tr'] and self.relation_granularity == 'coarse':
                     relation = self.rel2class.get(relation.lower())
 
                 #   Relation:
