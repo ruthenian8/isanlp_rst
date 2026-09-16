@@ -62,6 +62,10 @@ class DataManager:
         self.corpus_name = corpus
         self.relation_granularity = relation_granularity
         self.data_root = Path(data_root)
+        if corpus == 'RST-DT' and relation_granularity == 'fine':
+            # Version 2 orders RS3 schema arguments by textual EDU position,
+            # preventing discontinuous trees and invalid pointer-loss targets.
+            self.preparation_version = 2
 
         if self.corpus_name == 'GUM':
             self._init_gum_corpus(cross_validation, nfolds)

@@ -34,7 +34,8 @@ def _load_data_manager(path, data_root):
             manager = pickle.load(stream)
         is_current = getattr(manager, 'split_source', '').startswith(
             'https://github.com/disrpt/sharedtask2025')
-        if not is_current:
+        preparation_is_current = getattr(manager, 'preparation_version', 0) >= 2
+        if not is_current or not preparation_is_current:
             manager = DataManager(
                 'RST-DT', relation_granularity='fine', data_root=requested_root)
             manager.from_rs3()

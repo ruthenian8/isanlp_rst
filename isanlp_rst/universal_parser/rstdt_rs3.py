@@ -1,11 +1,26 @@
 """Prepare converted RST-DT RS3 trees for UniRST without collapsing labels."""
 
+import re
 from pathlib import Path
+
+
+def _leftmost_edu(wrapper, edu_indices):
+    """Return the textual position of a relation argument's first EDU."""
+
+    child = wrapper[0]
+    if isinstance(child, str):
+        return edu_indices[str(wrapper.root_id)]
+    return min(_leftmost_edu(descendant, edu_indices) for descendant in child)
 
 
 def _render_relation(node, edu_indices):
     relation = node.label()
-    roles = [child.label() for child in node]
+    # rstconverter retains RS3 schema/group order here. In a few RST-DT files
+    # that order differs from textual order, which used to create discontinuous
+    # Lisp trees and consequently invalid pointer-loss targets. UniRST expects
+    # every binary subtree to cover a contiguous, left-to-right EDU span.
+    children = sorted(node, key=lambda child: _leftmost_edu(child, edu_indices))
+    roles = [child.label() for child in children]
 
     def render_argument(wrapper):
         child = wrapper[0]
@@ -13,7 +28,7 @@ def _render_relation(node, edu_indices):
             return f"(EDU {edu_indices[str(wrapper.root_id)]})"
         return _render_relation(child, edu_indices)
 
-    arguments = [render_argument(child) for child in node]
+    arguments = [render_argument(child) for child in children]
     if len(arguments) == 2:
         nuclearity = "".join(roles)
         if nuclearity not in {"NN", "NS", "SN"}:
@@ -56,9 +71,17 @@ def convert_rs3_document(source, output_dir):
     basename = source.name[:-4] if source.name.endswith(".rs3") else source.name
     if basename.endswith(".out"):
         basename = basename[:-4]
-    (output_dir / f"{basename}.lisp").write_text(
-        _render_relation(document.tree, edu_indices), encoding="utf8"
-    )
+    rendered = _render_relation(document.tree, edu_indices)
+    rendered_edus = [
+        int(value) for value in re.findall(r"\(EDU (\d+)\)", rendered)
+    ]
+    expected_edus = list(range(1, len(document.edus) + 1))
+    if rendered_edus != expected_edus:
+        raise ValueError(
+            f"Converted tree for {source} is not a contiguous left-to-right "
+            "EDU tree"
+        )
+    (output_dir / f"{basename}.lisp").write_text(rendered, encoding="utf8")
     edu_lines = [
         " ".join(document.elem_dict[str(source_id)]["text"].split())
         for source_id in document.edus
