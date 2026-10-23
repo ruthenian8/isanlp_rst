@@ -162,7 +162,7 @@ class DUConverter:
             if left_start == start and right_end == end:
                 return idx
 
-    def construct_tree(self, root, edus, rels):
+    def construct_tree(self, root, edus, rels, _span_index=None):
         """
         Constructs the DiscourseUnit binary tree.
 
@@ -174,19 +174,25 @@ class DUConverter:
         Returns:
             Binary DiscourseUnit RST tree.
         """
+        if _span_index is None:
+            _span_index = {}
+            for idx, rel in enumerate(rels):
+                # Match _get_child's first-match behavior for duplicate spans.
+                _span_index.setdefault((rel[0], rel[5]), idx)
+
         left_start, left_end, relation, nuclearity, right_start, right_end, entropy = rels[root]
 
         if left_start == left_end:
             left = edus[left_start]
         else:
-            left_root = self._get_child(left_start, left_end, rels)
-            left = self.construct_tree(left_root, edus, rels)
+            left_root = _span_index.get((left_start, left_end))
+            left = self.construct_tree(left_root, edus, rels, _span_index)
 
         if right_start == right_end:
             right = edus[right_start]
         else:
-            right_root = self._get_child(right_start, right_end, rels)
-            right = self.construct_tree(right_root, edus, rels)
+            right_root = _span_index.get((right_start, right_end))
+            right = self.construct_tree(right_root, edus, rels, _span_index)
 
         self.du_id += 1
         du = DiscourseUnit(id=self.du_id,

@@ -364,12 +364,18 @@ class CRF(nn.Module):
 
         # shape: (batch_size,)
         seq_ends = mask.long().sum(dim=0) - 1
+        # Keep scoring and final tag selection on the original device. Only
+        # integer backpointers are needed for traceback; copy them in bulk to
+        # avoid a CUDA scalar read for every token.
+        best_last_tags = torch.stack([score[idx].max(0)[1] for idx in range(batch_size)]).cpu()
+        history = torch.stack(history).cpu() if history else []
+        seq_ends = seq_ends.cpu()
         best_tags_list = list()
 
         for idx in range(batch_size):
             # Find the tag which maximizes the score at the last timestep; this is our best tag
             # for the last timestep
-            _, best_last_tag = score[idx].max(0)
+            best_last_tag = best_last_tags[idx]
 
             # We trace back where the best last tag comes from, append that to our best tag
             # sequence, and trace it back again, and so on
@@ -391,7 +397,8 @@ class CRF(nn.Module):
 
         best_tags_list = torch.stack(best_tags_list, dim=0)
 
-        return best_tags_list
+        # Preserve CRF.decode's return device and padded output shape.
+        return best_tags_list.to(emissions.device)
 
 
 class ToNySegmenter(nn.Module):
@@ -518,7 +525,7 @@ class ToNySegmenter(nn.Module):
         prediction = self(encodings, sent_breaks)
 
         if self.use_crf:
-            pred = self.crf.decode(prediction.unsqueeze(0))[0]
+            pred = self.crf.decode(prediction.unsqueeze(0))[0].detach().cpu().tolist()
         else:
             pred = torch.argmax(prediction, dim=1).detach().cpu().tolist()
 

@@ -528,7 +528,8 @@ class ParsingNet(nn.Module):
                 loop_index = 0
 
                 if generate_tree:
-                    span = ''
+                    span = []
+                    split_entropies = []
 
                 tmp_decode_step = -1
 
@@ -594,7 +595,7 @@ class ParsingNet(nn.Module):
                                 nuclearity_right) + '=' + \
                                        str(relation_right) + ':' + str(stack_head[-1] + 1) + ')'
 
-                            span += ' ' + cur_span
+                            span.append(cur_span)
 
                     else:  # Length of stack_head >= 3
 
@@ -613,7 +614,9 @@ class ParsingNet(nn.Module):
 
                         split_values, topindex_tree = atten_weights.topk(1)
                         tree_predict = int(topindex_tree[0][0]) + stack_head[0]
-                        split_entropy = self._calculate_normalized_entropy(log_atten_weights)
+                        if generate_tree:
+                            split_entropies.append(self._calculate_normalized_entropy(
+                                log_atten_weights, return_tensor=True))
 
                         cur_tree.append(tree_predict)
 
@@ -665,17 +668,22 @@ class ParsingNet(nn.Module):
 
                             cur_span = '(' + str(stack_head[0] + 1) + ':' + str(nuclearity_left) + '=' + str(
                                 relation_left)
-                            cur_span += ';entropy=' + '{:.5f}'.format(split_entropy)
-                            cur_span += ':' + str(tree_predict + 1) + ',' + str(tree_predict + 2) + ':' + str(
+                            cur_span += ';entropy='
+                            span_end = ':' + str(tree_predict + 1) + ',' + str(tree_predict + 2) + ':' + str(
                                 nuclearity_right) + '=' + \
                                        str(relation_right) + ':' + str(stack_head[-1] + 1) + ')'
 
-                            span += ' ' + cur_span
+                            span.append((cur_span, span_end))
 
                 tree_batch.append(cur_tree)
                 label_batch.append(cur_label)
                 if generate_tree:
-                    span_batch.append([span.strip()])
+                    entropy_values = iter(
+                        torch.stack(split_entropies).cpu().tolist() if split_entropies else [])
+                    span_batch.append([' '.join(
+                        part if isinstance(part, str) else
+                        part[0] + '{:.5f}'.format(next(entropy_values)) + part[1]
+                        for part in span)])
 
         loss_label_batch /= min(1, loop_label_batch)
 
@@ -770,7 +778,7 @@ class ParsingNet(nn.Module):
 
         return input_left, input_right
 
-    def _calculate_normalized_entropy(self, log_atten_weights: torch.Tensor) -> float:
+    def _calculate_normalized_entropy(self, log_atten_weights: torch.Tensor, return_tensor=False):
         """
         Calculates the normalized entropy H(p) / log(N) from the
         log-probabilities (output of the pointer network).
@@ -783,17 +791,19 @@ class ParsingNet(nn.Module):
         Returns:
             float: The normalized entropy, a value between 0.0 (total
                    certainty) and 1.0 (total uncertainty).
+            When return_tensor is True, retain the scalar on its current device
+            so inference can transfer all node entropies together.
         """
         with torch.no_grad():
             N = log_atten_weights.shape[-1]  # Number of splitting options
             if N <= 1:
-                return 0.0
+                return log_atten_weights.new_zeros(()) if return_tensor else 0.0
 
             probs = torch.exp(log_atten_weights.detach())
             raw_entropy = -torch.sum(probs * log_atten_weights.detach(), dim=-1)
             max_entropy = torch.log(torch.tensor(N, device=probs.device, dtype=probs.dtype))
             normalized_entropy = raw_entropy / max_entropy
-            return normalized_entropy.cpu().item()
+            return normalized_entropy.reshape(()) if return_tensor else normalized_entropy.cpu().item()
 
     def eval_loss(self, batch, use_pred_segmentation=True, use_org_parseval=True):
 
