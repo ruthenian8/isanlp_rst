@@ -11,6 +11,7 @@ from isanlp_rst.universal_parser.src.parser.parsing_net import ParsingNet
 from isanlp_rst.universal_parser.src.parser.segmenters import CRF, ToNySegmenter
 from isanlp_rst.utils.du_converter import DUConverter
 from isanlp_rst.universal_parser.predictor import PredictorUniRST
+from isanlp_rst.universal_parser.benchmark_batch import compare_encodings, structure, tree_snapshot
 
 
 DEVICES = [
@@ -18,6 +19,29 @@ DEVICES = [
     pytest.param('cuda', marks=pytest.mark.skipif(
         not torch.cuda.is_available(), reason='CUDA unavailable')),
 ]
+
+
+def test_benchmark_detects_numeric_and_boundary_disagreements():
+    reference = [([1, 3], (torch.ones(2, 4), torch.ones(1, 4)))]
+    assert compare_encodings(reference, reference, 1e-5, 1e-4)['allclose']
+    perturbed = [([1, 3], (torch.ones(2, 4) + 0.01, torch.ones(1, 4)))]
+    result = compare_encodings(reference, perturbed, 1e-5, 1e-4)
+    assert not result['allclose']
+    assert result['max_absolute_error'] == pytest.approx(0.01)
+    assert not compare_encodings(reference, [], 1e-5, 1e-4)['allclose']
+    wrong_breaks = [([0, 3], reference[0][1])]
+    assert not compare_encodings(reference, wrong_breaks, 1e-5, 1e-4)['allclose']
+    wrong_shape = [([1, 3], (torch.ones(3, 4), torch.ones(1, 4)))]
+    assert not compare_encodings(reference, wrong_shape, 1e-5, 1e-4)['allclose']
+
+
+def test_benchmark_distinguishes_structure_from_entropy():
+    first = tree_snapshot(SimpleNamespace(text='Example', entropy=0.1))
+    second = tree_snapshot(SimpleNamespace(text='Example', entropy=0.2))
+    assert first != second
+    assert structure(first) == structure(second)
+    second['text'] = 'Different'
+    assert structure(first) != structure(second)
 
 
 @pytest.mark.parametrize('device', DEVICES)

@@ -379,6 +379,33 @@ Short documents share a padded transformer pass; long documents still use the
 original sliding window. Batch size controls memory use. Floating-point
 rounding can lead to different predictions near a decision boundary.
 
+Compare batch inference with individual calls on a GPU:
+
+```bash
+python -m isanlp_rst.universal_parser.benchmark_batch
+```
+
+The command uses a pinned released UniRST checkpoint and built-in documents of
+mixed lengths. It reports tree agreement, encoder differences, throughput,
+speedup, and peak allocated GPU memory for batch sizes 1, 4, and 8. Timing
+includes tokenization and tree reconstruction, with CUDA synchronization and
+warm-up; model loading and diagnostic tensor transfers are excluded.
+
+For a fine-tuned model and your own JSON array of document strings:
+
+```bash
+python -m isanlp_rst.universal_parser.benchmark_batch \
+  --relation-head-dir=saves/rstdt_merged_fine_relations \
+  --input=documents.json --batch-sizes 1 4 8 --device=0
+```
+
+`--model-dir` also accepts a local released model. Exit status is 0 when every
+batch preserves tree structure and encoder values satisfy `--atol=1e-5` and
+`--rtol=1e-4`; disagreement returns 1. Exact tree matches include entropy and
+are reported separately, since small score differences need not change the
+structure. CUDA is required; use representative documents for performance
+comparisons.
+
 ### Parsing Pre-Segmented EDUs
 
 You can pass custom segments instead of raw text:
