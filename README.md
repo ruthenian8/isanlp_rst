@@ -366,6 +366,19 @@ Returned relation names retain the merged native labels, such as
 `elaboration-object-attribute`, while multinuclear predictions are explicit,
 for example `cause-result-mn` and `same-unit-mn`.
 
+### Batch Parsing
+
+UniRST also supports bounded multi-document inference:
+
+```python
+results = parser.parse_batch(['First document.', 'Second document.'], batch_size=8)
+```
+
+Results follow input order and have the same structure as individual calls.
+Short documents share a padded transformer pass; long documents still use the
+original sliding window. Batch size controls memory use. Floating-point
+rounding can lead to different predictions near a decision boundary.
+
 ### Parsing Pre-Segmented EDUs
 
 You can pass custom segments instead of raw text:

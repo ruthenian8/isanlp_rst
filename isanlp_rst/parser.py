@@ -47,6 +47,12 @@ class Parser:
     def __call__(self, text: str):
         return self.predictor.parse_rst(text)
 
+    def parse_batch(self, texts: Sequence[str], batch_size: int = 8):
+        """Parse multiple documents using the UniRST batch path."""
+        if not hasattr(self.predictor, 'parse_batch'):
+            raise NotImplementedError('Batch parsing is available for UniRST only')
+        return self.predictor.parse_batch(texts, batch_size=batch_size)
+
     def from_edus(self, edus: Sequence[str]):
         """Parse a document using predefined EDUs."""
 

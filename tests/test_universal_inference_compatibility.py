@@ -6,10 +6,11 @@ import pytest
 import torch
 from torch import nn
 
-from isanlp_rst.universal_parser.src.parser.modules import DecoderRNN, DefaultLabelClassifier
+from isanlp_rst.universal_parser.src.parser.modules import DecoderRNN, DefaultLabelClassifier, EncoderRNN
 from isanlp_rst.universal_parser.src.parser.parsing_net import ParsingNet
 from isanlp_rst.universal_parser.src.parser.segmenters import CRF, ToNySegmenter
 from isanlp_rst.utils.du_converter import DUConverter
+from isanlp_rst.universal_parser.predictor import PredictorUniRST
 
 
 DEVICES = [
@@ -17,6 +18,130 @@ DEVICES = [
     pytest.param('cuda', marks=pytest.mark.skipif(
         not torch.cuda.is_available(), reason='CUDA unavailable')),
 ]
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_short_document_transformer_batch_matches_individual_inference(device):
+    class Transformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(pad_token_id=0)
+            self.embedding = nn.Embedding(20, 4)
+            self.calls = 0
+
+        def forward(self, ids, attention_mask=None):
+            self.calls += 1
+            return (self.embedding(ids),)
+
+    class Segmenter(nn.Module):
+        def test_segment_loss(self, embeddings, sent_breaks):
+            return [len(embeddings) - 1]
+
+    torch.manual_seed(2)
+    transformer = Transformer()
+    encoder = EncoderRNN(transformer, 4, 4, 1, 0, False,
+                         nn.ModuleList([Segmenter()]), 'avg', True, False, 1,
+                         256, 64, token_bilstm_hidden=0,
+                         cuda_device=torch.device(device)).to(device).eval()
+    documents = [[1, 2, 3], [4, 5, 6, 7, 8]]
+    with torch.inference_mode():
+        singles = [encoder([doc], None, None, [[]], is_test=True, dataset_index=[0])
+                   for doc in documents]
+        transformer.calls = 0
+        batched = encoder(documents, None, None, [[], []], is_test=True,
+                          dataset_index=[0, 0])
+    assert transformer.calls == 1
+    assert batched[3] == [result[3][0] for result in singles]
+    for i, result in enumerate(singles):
+        torch.testing.assert_close(batched[0][i], result[0][0])
+        torch.testing.assert_close(batched[1][:, i], result[1][:, 0])
+
+
+def test_batch_parser_preserves_order_and_single_edu_results():
+    class Tokenizer:
+        def __call__(self, texts, **kwargs):
+            return {'input_ids': [[1] * len(text.split()) for text in texts],
+                    'offset_mapping': [[(i * 2, i * 2 + 1) for i in range(len(text.split()))]
+                                       for text in texts]}
+
+        def convert_ids_to_tokens(self, ids):
+            return ['▁a'] * len(ids)
+
+    class Model:
+        def testing_loss(self, sentences, *args, **kwargs):
+            return 0, 0, [['NONE'] for _ in sentences], None, [
+                [len(sentence) - 1] for sentence in sentences]
+
+    predictor = PredictorUniRST.__new__(PredictorUniRST)
+    predictor.tokenizer = Tokenizer()
+    predictor.model = Model()
+    predictor.label_maps = None
+    predictor.relinventory_idx = 0
+    texts = ['a b c', 'a', 'a b c d', 'a b c']
+    expected = [predictor.parse_rst(text) for text in texts]
+    actual = predictor.parse_batch(texts, batch_size=2)
+    assert [result['rst'][0].text for result in actual] == [
+        result['rst'][0].text for result in expected]
+    with pytest.raises(ValueError, match='positive'):
+        predictor.parse_batch(texts, batch_size=0)
+    with pytest.raises(TypeError, match='sequence'):
+        predictor.parse_batch('a b c')
+    with pytest.raises(TypeError, match='integer'):
+        predictor.parse_batch(texts, batch_size=1.5)
+    assert predictor.parse_batch([]) == []
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_batch_attention_and_trees_match_single_documents(device):
+    from transformers import XLMRobertaConfig, XLMRobertaModel
+    from isanlp_rst.utils import tree_to_dict
+
+    class Segmenter(nn.Module):
+        def test_segment_loss(self, embeddings, sent_breaks):
+            return list(range(len(embeddings)))
+
+    class Tokenizer:
+        def __call__(self, texts, **kwargs):
+            return {'input_ids': [[3] * len(text.split()) for text in texts],
+                    'offset_mapping': [[(i * 2, i * 2 + 1) for i in range(len(text.split()))]
+                                       for text in texts]}
+
+        def convert_ids_to_tokens(self, ids):
+            return ['▁a'] * len(ids)
+
+    torch.manual_seed(8)
+    transformer = XLMRobertaModel(XLMRobertaConfig(
+        vocab_size=20, max_position_embeddings=514, hidden_size=4,
+        num_hidden_layers=1, num_attention_heads=2,
+        intermediate_size=8, hidden_dropout_prob=0, attention_probs_dropout_prob=0))
+    model = _parser(device, True)
+    model.encoder = EncoderRNN(
+        transformer, 4, 4, 1, 0, True, nn.ModuleList([Segmenter()]), 'avg',
+        True, False, 1, 256, 64, token_bilstm_hidden=0,
+        cuda_device=torch.device(device)).to(device).eval()
+    predictor = PredictorUniRST.__new__(PredictorUniRST)
+    predictor.tokenizer = Tokenizer()
+    predictor.model = model
+    predictor.label_maps = None
+    predictor.relinventory_idx = 0
+    texts = ['a b c', 'a', 'a b c d e', '', 'a b c d']
+    keys = tuple(model.state_dict())
+    expected = [tree_to_dict(predictor.parse_rst(text)['rst'][0]) for text in texts]
+    for size in (1, 2, 8):
+        actual = [tree_to_dict(result['rst'][0])
+                  for result in predictor.parse_batch(texts, batch_size=size)]
+        assert actual == expected
+    assert tuple(model.state_dict()) == keys
+
+    docs = [[3, 4, 5], [6, 7, 8, 9, 10]] + [[3] * size for size in (511, 512, 513)]
+    with torch.inference_mode():
+        singles = [model.encoder([doc], None, None, [[]], is_test=True, dataset_index=[0])
+                   for doc in docs]
+        batched = model.encoder(docs, None, None, [[] for _ in docs], is_test=True,
+                                dataset_index=[0] * len(docs))
+    for i, (outputs, hidden, _, _) in enumerate(singles):
+        torch.testing.assert_close(batched[0][i, :len(docs[i])], outputs[0], atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(batched[1][:, i], hidden[:, 0], atol=1e-6, rtol=1e-5)
 
 
 def _legacy_viterbi(crf, emissions, mask):

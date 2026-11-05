@@ -796,6 +796,60 @@ class PredictorUniRST(BasePredictor):
             'rst': [tree],
         }
 
+    def parse_batch(self, texts: Sequence[str], batch_size: int = 8) -> list:
+        """Parse documents in bounded batches, preserving input order."""
+        if isinstance(texts, (str, bytes)):
+            raise TypeError('texts must be a sequence of document strings')
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+            raise TypeError('batch_size must be an integer')
+        if batch_size < 1:
+            raise ValueError('batch_size must be positive')
+        if len(texts) > batch_size:
+            return [result
+                    for start in range(0, len(texts), batch_size)
+                    for result in self.parse_batch(texts[start:start + batch_size], batch_size)]
+        results = [None] * len(texts)
+        pending = []
+        converter = _du_converter()
+        for index, text in enumerate(texts):
+            if text is None:
+                raise ValueError('`text` must be provided for parsing.')
+            tokens = list(razdel.tokenize(text))
+            words = [token.text for token in tokens]
+            offsets = [(token.start, token.stop) for token in tokens]
+            positions, original = self.build_offset_converter_from_words(text, words, offsets)
+            if len(words) < 3:
+                tree = converter.dummy_tree(words)
+                self.remap_tree_offsets(tree, positions, original, text)
+                results[index] = {'rst': [tree]}
+            else:
+                pending.append((index, text, words, positions, original))
+
+        for start in range(0, len(pending), batch_size):
+            items = pending[start:start + batch_size]
+            words = [item[2] for item in items]
+            empty = [[] for _ in items]
+            data = Data(input_sentences=words, edu_breaks=empty, decoder_input=empty,
+                        relation_label=empty, parsing_breaks=empty, golden_metric=empty)
+            batch = self.tokenize(data)
+            with torch.inference_mode():
+                _, _, spans, _, breaks = self.model.testing_loss(
+                    batch.input_sentences, batch.sent_breaks, batch.entity_ids,
+                    batch.entity_position_ids, batch.edu_breaks, batch.relation_label,
+                    batch.parsing_breaks, generate_tree=True, use_pred_segmentation=True,
+                    dataset_index=batch.dataset_index)
+            for i, (index, text, doc_words, positions, original) in enumerate(items):
+                predictions = {
+                    'tokens': [self.tokenizer.convert_ids_to_tokens(batch.input_sentences[i])],
+                    'spans': [spans[i]], 'edu_breaks': [breaks[i]],
+                    'true_spans': [batch.golden_metric[i]],
+                    'true_edu_breaks': [batch.edu_breaks[i]],
+                }
+                tree = converter(predictions, tokenization_type='default').collect(tokens=[doc_words])[0]
+                self.remap_tree_offsets(tree, positions, original, text)
+                results[index] = {'rst': [tree]}
+        return results
+
     def parse_from_edus(self, edus: Sequence[str]) -> dict:
         """Parse text using predefined EDU boundaries."""
 

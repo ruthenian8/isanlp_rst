@@ -128,13 +128,33 @@ class EncoderRNN(nn.Module):
         predict_edu_breaks_list = []
         tem_outputs = []
 
+        batched_embeddings = {}
+        if is_test and not self.training and not entity_ids and not entity_position_ids:
+            indices = [i for i, tokens in enumerate(input_tokenized_texts)
+                       if 0 < len(tokens) < 512]
+            pad_id = getattr(getattr(self.transformer, 'config', None), 'pad_token_id', None)
+            if len(indices) > 1 and pad_id is not None:
+                lengths = [len(input_tokenized_texts[i]) for i in indices]
+                token_batch = torch.full((len(indices), max(lengths)), pad_id,
+                                         dtype=torch.long, device=self._cuda_device)
+                attention_mask = torch.zeros_like(token_batch)
+                for row, (i, length) in enumerate(zip(indices, lengths)):
+                    token_batch[row, :length] = torch.as_tensor(
+                        input_tokenized_texts[i], device=self._cuda_device)
+                    attention_mask[row, :length] = 1
+                outputs = self.transformer(token_batch, attention_mask=attention_mask)[0]
+                for row, (i, length) in enumerate(zip(indices, lengths)):
+                    batched_embeddings[i] = outputs[row:row + 1, :length]
+
         for i in range(len(input_tokenized_texts)):
             token_ids = torch.LongTensor(input_tokenized_texts[i]).to(self._cuda_device)
             entity_ids_i = torch.LongTensor(entity_ids[i]).to(self._cuda_device) if entity_ids else None
             entity_position_ids_i = torch.LongTensor(entity_position_ids[i]).to(self._cuda_device
                                                                                 ) if entity_position_ids else None
             # Shape: (n_subwords, 768)
-            embeddings = self._fixed_sliding_window(token_ids, entity_ids_i, entity_position_ids_i)
+            embeddings = batched_embeddings.get(i)
+            if embeddings is None:
+                embeddings = self._fixed_sliding_window(token_ids, entity_ids_i, entity_position_ids_i)
             if self.normalize_embeddings:
                 embeddings = self.layer_norm(embeddings)
 
