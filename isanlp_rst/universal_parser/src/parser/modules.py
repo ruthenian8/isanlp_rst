@@ -129,7 +129,7 @@ class EncoderRNN(nn.Module):
         tem_outputs = []
 
         batched_embeddings = {}
-        if is_test and not self.training and not entity_ids and not entity_position_ids:
+        if not self.training and not torch.is_grad_enabled() and not entity_ids and not entity_position_ids:
             indices = [i for i, tokens in enumerate(input_tokenized_texts)
                        if 0 < len(tokens) < 512]
             pad_id = getattr(getattr(self.transformer, 'config', None), 'pad_token_id', None)

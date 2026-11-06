@@ -852,92 +852,68 @@ class PredictorUniRST(BasePredictor):
 
     def parse_from_edus(self, edus: Sequence[str]) -> dict:
         """Parse text using predefined EDU boundaries."""
+        return self.parse_from_edus_batch([edus], batch_size=1)[0]
 
-        DUConverter = _du_converter()
-        normalized_edus = self._validate_edus(edus)
-        text, spans = self._compute_edu_char_spans(normalized_edus)
-
-        razdel_tokens = list(razdel.tokenize(text))
-        word_tokens = [token.text for token in razdel_tokens]
-        offsets = [(token.start, token.stop) for token in razdel_tokens]
-
-        offset_positions, original_offsets = self.build_offset_converter_from_words(text, word_tokens, offsets)
-
-        if not word_tokens:
-            raise ValueError('Unable to tokenize text derived from the provided EDUs.')
-
-        if len(normalized_edus) == 1:
-            tree = DUConverter.dummy_tree(word_tokens)
-            self.remap_tree_offsets(tree, offset_positions, original_offsets, text)
-            leaves: List[str] = []
-            self._collect_leaf_texts(tree, leaves)
-            if leaves != normalized_edus:
-                raise ValueError('Failed to align the provided EDU with the parser output.')
-            return {
-                'rst': [tree],
-            }
-
-        edu_breaks = self._char_spans_to_token_breaks(offsets, spans)
-
-        num_edus = len(edu_breaks)
-        relation_placeholder = [[0] * max(num_edus - 1, 0)]
-        parsing_placeholder = [[0] * max(num_edus - 1, 0)]
-
-        data = Data(
-            input_sentences=[word_tokens],
-            edu_breaks=[edu_breaks],
-            decoder_input=[[]],
-            relation_label=relation_placeholder,
-            parsing_breaks=parsing_placeholder,
-            golden_metric=[[]],
-        )
-
-        predictions = {
-            'tokens': [],
-            'spans': [],
-            'edu_breaks': [],
-            'true_spans': [],
-            'true_edu_breaks': [],
-        }
-
-        batch = self.tokenize(data)
-
-        with torch.inference_mode():
-            (
-                _loss_tree,
-                _loss_label,
-                span_batch,
-                _label_tuple_batch,
-                predict_edu_breaks,
-            ) = self.model.testing_loss(
-                batch.input_sentences,
-                batch.sent_breaks,
-                batch.entity_ids,
-                batch.entity_position_ids,
-                batch.edu_breaks,
-                batch.relation_label,
-                batch.parsing_breaks,
-                generate_tree=True,
-                use_pred_segmentation=False,
-                dataset_index=batch.dataset_index,
-            )
-
-        predictions['tokens'] += [
-            self.tokenizer.convert_ids_to_tokens(text) for text in batch.input_sentences
-        ]
-        predictions['spans'] += span_batch
-        predictions['edu_breaks'] += batch.edu_breaks
-        predictions['true_spans'] += batch.golden_metric
-        predictions['true_edu_breaks'] += batch.edu_breaks
-
-        tree = DUConverter(predictions, tokenization_type='default').collect(tokens=[word_tokens])[0]
-        self.remap_tree_offsets(tree, offset_positions, original_offsets, text)
-
-        leaves: List[str] = []
-        self._collect_leaf_texts(tree, leaves)
-        if leaves != normalized_edus:
-            raise ValueError('The produced segmentation does not match the provided EDUs.')
-
-        return {
-            'rst': [tree],
-        }
+    def parse_from_edus_batch(self, documents: Sequence[Sequence[str]], batch_size: int = 8) -> list:
+        """Parse bounded batches while retaining each document's supplied EDUs."""
+        if isinstance(documents, (str, bytes)):
+            raise TypeError('documents must be a sequence of EDU sequences')
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+            raise TypeError('batch_size must be an integer')
+        if batch_size < 1:
+            raise ValueError('batch_size must be positive')
+        if len(documents) > batch_size:
+            return [result
+                    for start in range(0, len(documents), batch_size)
+                    for result in self.parse_from_edus_batch(documents[start:start + batch_size], batch_size)]
+        converter = _du_converter()
+        results = [None] * len(documents)
+        pending = []
+        for index, edus in enumerate(documents):
+            normalized = self._validate_edus(edus)
+            text, spans = self._compute_edu_char_spans(normalized)
+            tokens = list(razdel.tokenize(text))
+            words = [token.text for token in tokens]
+            offsets = [(token.start, token.stop) for token in tokens]
+            positions, original = self.build_offset_converter_from_words(text, words, offsets)
+            if not words:
+                raise ValueError('Unable to tokenize text derived from the provided EDUs.')
+            if len(normalized) == 1:
+                tree = converter.dummy_tree(words)
+                self.remap_tree_offsets(tree, positions, original, text)
+                leaves = []
+                self._collect_leaf_texts(tree, leaves)
+                if leaves != normalized:
+                    raise ValueError('Failed to align the provided EDU with the parser output.')
+                results[index] = {'rst': [tree]}
+            else:
+                breaks = self._char_spans_to_token_breaks(offsets, spans)
+                pending.append((index, normalized, text, words, positions, original, breaks))
+        if pending:
+            placeholders = [[0] * (len(item[6]) - 1) for item in pending]
+            data = Data(input_sentences=[item[3] for item in pending],
+                        edu_breaks=[item[6] for item in pending],
+                        decoder_input=[[] for _ in pending], relation_label=placeholders,
+                        parsing_breaks=placeholders, golden_metric=[[] for _ in pending])
+            batch = self.tokenize(data)
+            with torch.inference_mode():
+                _, _, spans, _, _ = self.model.testing_loss(
+                    batch.input_sentences, batch.sent_breaks, batch.entity_ids,
+                    batch.entity_position_ids, batch.edu_breaks, batch.relation_label,
+                    batch.parsing_breaks, generate_tree=True, use_pred_segmentation=False,
+                    dataset_index=batch.dataset_index)
+            for i, (index, normalized, text, words, positions, original, _) in enumerate(pending):
+                predictions = {
+                    'tokens': [self.tokenizer.convert_ids_to_tokens(batch.input_sentences[i])],
+                    'spans': [spans[i]], 'edu_breaks': [batch.edu_breaks[i]],
+                    'true_spans': [batch.golden_metric[i]],
+                    'true_edu_breaks': [batch.edu_breaks[i]],
+                }
+                tree = converter(predictions, tokenization_type='default').collect(tokens=[words])[0]
+                self.remap_tree_offsets(tree, positions, original, text)
+                leaves = []
+                self._collect_leaf_texts(tree, leaves)
+                if leaves != normalized:
+                    raise ValueError('The produced segmentation does not match the provided EDUs.')
+                results[index] = {'rst': [tree]}
+        return results

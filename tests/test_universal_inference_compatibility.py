@@ -79,6 +79,15 @@ def test_short_document_transformer_batch_matches_individual_inference(device):
     for i, result in enumerate(singles):
         torch.testing.assert_close(batched[0][i], result[0][0])
         torch.testing.assert_close(batched[1][:, i], result[1][:, 0])
+    transformer.calls = 0
+    with torch.enable_grad():
+        encoder(documents, None, None, [[2], [4]], is_test=False, dataset_index=[0, 0])
+    assert transformer.calls == 2
+    encoder.train()
+    transformer.calls = 0
+    with torch.inference_mode():
+        encoder(documents, None, None, [[2], [4]], is_test=False, dataset_index=[0, 0])
+    assert transformer.calls == 2
 
 
 def test_batch_parser_preserves_order_and_single_edu_results():
@@ -156,6 +165,38 @@ def test_batch_attention_and_trees_match_single_documents(device):
                   for result in predictor.parse_batch(texts, batch_size=size)]
         assert actual == expected
     assert tuple(model.state_dict()) == keys
+
+    documents = [['a b', 'c'], ['a'], ['a b', 'c d', 'e'], ['a b c d']]
+    expected = [tree_to_dict(predictor.parse_from_edus(edus)['rst'][0]) for edus in documents]
+    transformer_batches = []
+    hook = transformer.register_forward_pre_hook(
+        lambda module, args: transformer_batches.append(len(args[0])))
+    try:
+        actual = predictor.parse_from_edus_batch(documents)
+    finally:
+        hook.remove()
+    assert transformer_batches == [2]
+    assert [tree_to_dict(result['rst'][0]) for result in actual] == expected
+    from isanlp_rst.parser import Parser
+    parser = Parser.__new__(Parser)
+    parser.predictor = predictor
+    for size in (1, 2, 8):
+        assert [tree_to_dict(result['rst'][0])
+                for result in parser.from_edus_batch(documents, batch_size=size)] == expected
+    assert tree_to_dict(parser.from_edus(documents[0])['rst'][0]) == expected[0]
+    for result, edus in zip(actual, documents):
+        leaves = []
+        predictor._collect_leaf_texts(result['rst'][0], leaves)
+        assert leaves == edus
+    assert predictor.parse_from_edus_batch([]) == []
+    with pytest.raises(ValueError, match='positive'):
+        predictor.parse_from_edus_batch(documents, batch_size=0)
+    with pytest.raises(TypeError):
+        predictor.parse_from_edus_batch(['a b', 'c'])
+    with pytest.raises(ValueError):
+        predictor.parse_from_edus_batch([[]])
+    with pytest.raises(ValueError):
+        predictor.parse_from_edus_batch([['   ']])
 
     docs = [[3, 4, 5], [6, 7, 8, 9, 10]] + [[3] * size for size in (511, 512, 513)]
     with torch.inference_mode():

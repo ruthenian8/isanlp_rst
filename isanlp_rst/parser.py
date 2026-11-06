@@ -57,3 +57,9 @@ class Parser:
         """Parse a document using predefined EDUs."""
 
         return self.predictor.parse_from_edus(edus)
+
+    def from_edus_batch(self, documents: Sequence[Sequence[str]], batch_size: int = 8):
+        """Parse multiple documents with supplied EDU boundaries using UniRST."""
+        if not hasattr(self.predictor, 'parse_from_edus_batch'):
+            raise NotImplementedError('Batch parsing is available for UniRST only')
+        return self.predictor.parse_from_edus_batch(documents, batch_size=batch_size)

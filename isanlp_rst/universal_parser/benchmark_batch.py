@@ -80,6 +80,8 @@ def measure(run, device, repeats, count):
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('--input', type=Path, help='JSON array of document strings; otherwise use built-in examples')
+    cli.add_argument('--from-edus', action='store_true',
+                     help='Read a JSON array of EDU arrays and benchmark supplied boundaries')
     source = cli.add_mutually_exclusive_group()
     source.add_argument('--model-dir', help='Local released UniRST model directory')
     source.add_argument('--relation-head-dir', help='Fine-tuned artifact directory (head or full model)')
@@ -100,14 +102,27 @@ def main():
         cli.error('a valid CUDA device is required')
 
     sentence = 'The experiment finished successfully. However, further evidence is needed before drawing conclusions.'
-    texts = json.loads(args.input.read_text(encoding='utf8')) if args.input else [
+    examples = [
         '', 'Hello.', 'Two words', sentence, sentence * 2, sentence * 4,
         (sentence + ' ') * 45, (sentence + ' ') * 60,
     ]
-    if not isinstance(texts, list) or not texts or any(not isinstance(text, str) for text in texts):
-        cli.error('input must be a nonempty JSON array of strings')
-    if not any(len(text.split()) >= 3 for text in texts):
-        cli.error('include at least one document with three or more words to exercise the model')
+    texts = json.loads(args.input.read_text(encoding='utf8')) if args.input else (
+        [['Hello.'], ['Two words']] + [[sentence] * count for count in (2, 3, 4, 45, 60)]
+        if args.from_edus else examples)
+    if args.from_edus:
+        if not isinstance(texts, list) or not texts:
+            cli.error('input must be a nonempty JSON array of EDU arrays')
+        if any(not isinstance(document, list) or not document or
+               any(not isinstance(edu, str) or not edu for edu in document)
+               for document in texts):
+            cli.error('each document must be a nonempty array of nonempty EDU strings')
+        if not any(len(document) > 1 for document in texts):
+            cli.error('include at least one document with multiple EDUs to exercise the model')
+    else:
+        if not isinstance(texts, list) or not texts or any(not isinstance(text, str) for text in texts):
+            cli.error('input must be a nonempty JSON array of strings')
+        if not any(len(text.split()) >= 3 for text in texts):
+            cli.error('include at least one document with three or more words to exercise the model')
 
     torch.manual_seed(42)
     torch.cuda.set_device(args.device)
@@ -120,7 +135,9 @@ def main():
             hf_model_version=args.revision, relinventory=args.relinventory,
             cuda_device=args.device)
     predictor.model.eval()
-    single = lambda: [predictor.parse_rst(text) for text in texts]
+    parse_one = predictor.parse_from_edus if args.from_edus else predictor.parse_rst
+    parse_batch = predictor.parse_from_edus_batch if args.from_edus else predictor.parse_batch
+    single = lambda: [parse_one(text) for text in texts]
     baseline, encodings = capture_encoder(predictor, single)
     snapshots = [tree_snapshot(result['rst'][0]) for result in baseline]
     timing = measure(single, args.device, args.repeats, len(texts))
@@ -133,11 +150,12 @@ def main():
         'revision': args.revision if not (args.model_dir or args.relation_head_dir) else None,
         'inventory': predictor.relinventory, 'documents': len(texts),
         'repeats': args.repeats, 'atol': args.atol, 'rtol': args.rtol,
+        'from_edus': args.from_edus,
         'baseline': timing, 'batches': [],
     }
     passed = True
     for size in args.batch_sizes:
-        run = lambda: predictor.parse_batch(texts, batch_size=size)
+        run = lambda: parse_batch(texts, batch_size=size)
         results, actual = capture_encoder(predictor, run)
         trees = [tree_snapshot(result['rst'][0]) for result in results]
         mismatches = [i for i, (expected, tree) in enumerate(zip(snapshots, trees))

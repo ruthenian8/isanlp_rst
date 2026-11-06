@@ -419,6 +419,28 @@ my_edus = [
 res = parser.from_edus(my_edus)
 ```
 
+For multiple documents, UniRST batches transformer inference while retaining
+the supplied EDU boundaries and returning results in document order:
+
+```python
+results = parser.from_edus_batch([
+    ['The experiment finished.', 'The results were encouraging.'],
+    ['A second document.', 'More evidence is needed.', 'Further work is planned.'],
+], batch_size=8)
+```
+
+Each inner list is one document. The single-document `from_edus` method uses
+the same implementation. Segmentation prediction is bypassed; validation still
+requires every output leaf to match its supplied EDU. Single-EDU documents
+are handled without running the model. Batch inference is available for UniRST.
+
+Benchmark supplied-EDU inference on a GPU with built-in examples, or supply
+`--input=edus.json` containing an array of EDU arrays:
+
+```bash
+python -m isanlp_rst.universal_parser.benchmark_batch --from-edus
+```
+
 ### Memory Management for Large Datasets
 
 When parsing many documents, the resulting `DiscourseUnit` trees can consume significant memory, as each node stores its corresponding text span.
