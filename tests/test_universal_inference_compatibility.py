@@ -226,6 +226,40 @@ def test_trainable_edu_attention_matches_per_edu_calculation(device):
         torch.testing.assert_close(left, right, atol=1e-6, rtol=1e-5)
 
 
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('add_first_and_last', [False, True])
+def test_document_gru_batches_equal_edu_counts(device, add_first_and_last):
+    class Transformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(pad_token_id=0)
+            self.embedding = nn.Embedding(20, 4)
+
+        def forward(self, ids, attention_mask=None):
+            return (self.embedding(ids),)
+
+    torch.manual_seed(28)
+    encoder = EncoderRNN(Transformer(), 4, 4, 1, 0, False, nn.ModuleList(),
+                         'trainable', True, add_first_and_last, 1, 256, 64,
+                         token_bilstm_hidden=0, cuda_device=torch.device(device)).to(device).eval()
+    docs = [[3, 4, 5, 6, 7, 8], [4, 5, 6, 7, 8, 9, 10], [5, 6, 7, 8, 9]]
+    breaks = [[1, 3, 5], [1, 3, 6], [1, 4]]
+    sizes = []
+    with torch.inference_mode():
+        singles = [encoder([doc], None, None, [edu], dataset_index=[0])
+                   for doc, edu in zip(docs, breaks)]
+        hook = encoder.doc_gru_enc.register_forward_pre_hook(
+            lambda module, args: sizes.append(args[0].shape[0]))
+        try:
+            batched = encoder(docs, None, None, breaks, dataset_index=[0, 0, 0])
+        finally:
+            hook.remove()
+    assert sizes == [2, 1]
+    for i, (outputs, hidden, _, _) in enumerate(singles):
+        torch.testing.assert_close(batched[0][i, :len(breaks[i])], outputs[0], atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(batched[1][:, i], hidden[:, 0], atol=1e-6, rtol=1e-5)
+
+
 def test_window_storage_is_released_before_edu_encoding():
     import weakref
 
@@ -246,10 +280,10 @@ def test_window_storage_is_released_before_edu_encoding():
                          cuda_device=torch.device('cpu')).eval()
     encode_edus = encoder.encode_edus
 
-    def check_storage(embeddings, breaks):
+    def check_storage(embeddings, breaks, **kwargs):
         assert len(transformer.storages) > 1
         assert all(ref() is None for ref in transformer.storages)
-        return encode_edus(embeddings, breaks)
+        return encode_edus(embeddings, breaks, **kwargs)
 
     encoder.encode_edus = check_storage
     with torch.inference_mode():

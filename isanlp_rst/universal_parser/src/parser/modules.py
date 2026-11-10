@@ -127,6 +127,9 @@ class EncoderRNN(nn.Module):
         total_edu_loss = torch.FloatTensor([0.0]).to(self._cuda_device)
         predict_edu_breaks_list = []
         tem_outputs = []
+        deferred = []
+        batch_gru = (len(input_tokenized_texts) > 1 and self.document_enc_gru and
+                     not self.training and not torch.is_grad_enabled())
 
         batched_embeddings = {}
         if not self.training and not torch.is_grad_enabled() and not entity_ids and not entity_position_ids:
@@ -198,9 +201,25 @@ class EncoderRNN(nn.Module):
 
             predict_edu_breaks_list.append(cur_edu_break)
 
-            outputs, hidden = self.encode_edus(self.dropout(embeddings.squeeze(dim=0)), cur_edu_break)
+            edu_input = self.dropout(embeddings.squeeze(dim=0))
+            outputs, hidden = self.encode_edus(edu_input, cur_edu_break, defer_gru=batch_gru)
             tem_outputs.append(outputs)
             all_hidden.append(hidden)
+            if batch_gru:
+                deferred.append(edu_input)
+
+        if batch_gru:
+            groups = {}
+            for i, outputs in enumerate(tem_outputs):
+                groups.setdefault(outputs.shape[1], []).append(i)
+            for indices in groups.values():
+                outputs, hidden = self.doc_gru_enc(torch.cat([tem_outputs[i] for i in indices], dim=0))
+                hidden = hidden.view(2, 2, len(indices), int(self.hidden_size / 2))[-1]
+                hidden = hidden.transpose(0, 1).reshape(1, len(indices), -1)
+                for row, i in enumerate(indices):
+                    tem_outputs[i] = self._finish_edu_encoding(
+                        outputs[row:row + 1], deferred[i], predict_edu_breaks_list[i])
+                    all_hidden[i] = hidden[:, row:row + 1].contiguous()
 
         max_edu_break_num = max([len(tmp_l) for tmp_l in predict_edu_breaks_list])
 
@@ -216,12 +235,25 @@ class EncoderRNN(nn.Module):
 
         return res_merged_output, res_merged_hidden, total_edu_loss, predict_edu_breaks_list
 
-    def encode_edus(self, embeddings, cur_edu_break):
+    def encode_edus(self, embeddings, cur_edu_break, defer_gru=False):
         tmp_edus_list = []
         tmp_break_list = [0, ] + [tmp_j + 1 for tmp_j in cur_edu_break]
         attention_scores = None
         if self.edu_encoding_kind == 'trainable' and not self.training and not torch.is_grad_enabled():
             attention_scores = self._edu_attention(embeddings)
+
+        if attention_scores is not None:
+            groups = {}
+            for start, end in zip(tmp_break_list, tmp_break_list[1:]):
+                assert start < end
+                groups.setdefault(end - start, []).append(start)
+            edu_vectors = {}
+            for length, starts in groups.items():
+                indices = torch.tensor(starts, device=embeddings.device).unsqueeze(1) + torch.arange(
+                    length, device=embeddings.device).unsqueeze(0)
+                weights = F.softmax(attention_scores[indices], dim=1)
+                values = (embeddings[indices] * weights).sum(dim=1)
+                edu_vectors.update(zip(starts, values.unbind(0)))
 
         for tmp_i in range(len(tmp_break_list) - 1):
             assert tmp_break_list[tmp_i] < tmp_break_list[tmp_i + 1]
@@ -229,18 +261,25 @@ class EncoderRNN(nn.Module):
             if attention_scores is None:
                 edu_embedding = self._encode_edu(edu_embeddings)
             else:
-                scores = attention_scores[tmp_break_list[tmp_i]:tmp_break_list[tmp_i + 1]]
-                edu_embedding = (edu_embeddings * F.softmax(scores, dim=0)).sum(dim=0, keepdim=True)
+                edu_embedding = edu_vectors[tmp_break_list[tmp_i]].unsqueeze(0)
             tmp_edus_list.append(edu_embedding)
 
         outputs = torch.cat(tmp_edus_list, dim=0).unsqueeze(dim=0)
+
+        if defer_gru:
+            return outputs, None
 
         if self.document_enc_gru:
             outputs, hidden = self.doc_gru_enc(outputs)
             hidden = hidden.view(2, 2, 1, int(self.hidden_size / 2))[-1]
             hidden = hidden.transpose(0, 1).view(1, 1, -1).contiguous()
 
+        outputs = self._finish_edu_encoding(outputs, embeddings, cur_edu_break)
+        return outputs, hidden
+
+    def _finish_edu_encoding(self, outputs, embeddings, cur_edu_break):
         if self.add_first_and_last:
+            tmp_break_list = [0] + [index + 1 for index in cur_edu_break]
             first_words = []
             last_words = []
             for tmp_i in range(len(tmp_break_list) - 1):
@@ -253,7 +292,7 @@ class EncoderRNN(nn.Module):
             if self.add_first_and_last and self.edu_embedding_compression_rate < 1.:
                 outputs = self.reduce_dim_layer(outputs)
 
-        return outputs, hidden
+        return outputs
 
     def _encode_edu(self, edu_embeddings):
         """

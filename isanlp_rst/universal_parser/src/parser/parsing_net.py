@@ -529,7 +529,7 @@ class ParsingNet(nn.Module):
 
                 if generate_tree:
                     span = []
-                    split_entropies = []
+                    span_records = []
 
                 tmp_decode_step = -1
 
@@ -562,8 +562,7 @@ class ParsingNet(nn.Module):
                             relation_weights, log_relation_weights = self.label_classifiers[cls_idx](
                                 input_left, input_right)
                         _, topindex = relation_weights.topk(1)
-                        label_idx = int(topindex[0][0])
-                        cur_label.append(label_idx)
+                        cur_label.append(topindex[0][0])
 
                         # For 2 EDU case, we directly point the first EDU as the current parsing tree break
                         cur_tree.append(stack_head[0])
@@ -579,23 +578,7 @@ class ParsingNet(nn.Module):
                         del stacks[-1]
 
                         if generate_tree:
-                            # To generate a tree structure
-
-                            if self.dataset_masks is not None:
-                                nuclearity_left, nuclearity_right, relation_left, relation_right = \
-                                        nucs_and_rels(label_idx, self.relation_vocab)
-                            else:
-                                (nuclearity_left, nuclearity_right, relation_left, relation_right) = nucs_and_rels(
-                                    label_idx, self.relation_tables[cls_idx])
-
-                            cur_span = '(' + str(stack_head[0] + 1) + ':' + str(nuclearity_left) + '=' + str(
-                                relation_left)
-                            cur_span += ';entropy=' + '{:.5f}'.format(0.0)
-                            cur_span += ':' + str(stack_head[0] + 1) + ',' + str(stack_head[-1] + 1) + ':' + str(
-                                nuclearity_right) + '=' + \
-                                       str(relation_right) + ':' + str(stack_head[-1] + 1) + ')'
-
-                            span.append(cur_span)
+                            span_records.append((stack_head[0], stack_head[0], stack_head[-1], None))
 
                     else:  # Length of stack_head >= 3
 
@@ -615,8 +598,8 @@ class ParsingNet(nn.Module):
                         split_values, topindex_tree = atten_weights.topk(1)
                         tree_predict = int(topindex_tree[0][0]) + stack_head[0]
                         if generate_tree:
-                            split_entropies.append(self._calculate_normalized_entropy(
-                                log_atten_weights, return_tensor=True))
+                            split_entropy = self._calculate_normalized_entropy(
+                                log_atten_weights, return_tensor=True)
 
                         cur_tree.append(tree_predict)
 
@@ -638,8 +621,7 @@ class ParsingNet(nn.Module):
                                 input_left_du, input_right_du)
 
                         _, topindex_label = relation_weights.topk(1)
-                        label_idx = int(topindex_label[0][0])
-                        cur_label.append(label_idx)
+                        cur_label.append(topindex_label[0][0])
 
                         # Stacks stuff
                         stack_left = stack_head[:(tree_predict - stack_head[0] + 1)]
@@ -657,33 +639,21 @@ class ParsingNet(nn.Module):
                             stacks.append(stack_left)
 
                         if generate_tree:
-                            # Generate a span structure: e.g. (1:Nucleus=span:8,9:Satellite=Attribution:12)
-                            cls_idx = self.dataset2classifier[cur_dataset_index]
-                            if self.dataset_masks is not None:
-                                nuclearity_left, nuclearity_right, relation_left, relation_right = \
-                                    nucs_and_rels(label_idx, self.relation_vocab)
-                            else:
-                                nuclearity_left, nuclearity_right, relation_left, relation_right = \
-                                    nucs_and_rels(label_idx, self.relation_tables[cls_idx])
-
-                            cur_span = '(' + str(stack_head[0] + 1) + ':' + str(nuclearity_left) + '=' + str(
-                                relation_left)
-                            cur_span += ';entropy='
-                            span_end = ':' + str(tree_predict + 1) + ',' + str(tree_predict + 2) + ':' + str(
-                                nuclearity_right) + '=' + \
-                                       str(relation_right) + ':' + str(stack_head[-1] + 1) + ')'
-
-                            span.append((cur_span, span_end))
+                            span_records.append((stack_head[0], tree_predict, stack_head[-1], split_entropy))
 
                 tree_batch.append(cur_tree)
+                cur_label = torch.stack(cur_label).cpu().tolist()
                 label_batch.append(cur_label)
                 if generate_tree:
-                    entropy_values = iter(
-                        torch.stack(split_entropies).cpu().tolist() if split_entropies else [])
-                    span_batch.append([' '.join(
-                        part if isinstance(part, str) else
-                        part[0] + '{:.5f}'.format(next(entropy_values)) + part[1]
-                        for part in span)])
+                    entropy_tensors = [record[3] for record in span_records if record[3] is not None]
+                    entropy_values = iter(torch.stack(entropy_tensors).cpu().tolist() if entropy_tensors else [])
+                    table = self.relation_vocab if self.dataset_masks is not None else self.relation_tables[cls_idx]
+                    for (left, split, right, entropy), label in zip(span_records, cur_label):
+                        nuc_left, nuc_right, rel_left, rel_right = nucs_and_rels(label, table)
+                        value = 0.0 if entropy is None else next(entropy_values)
+                        span.append(f'({left + 1}:{nuc_left}={rel_left};entropy={value:.5f}:'
+                                    f'{split + 1},{split + 2}:{nuc_right}={rel_right}:{right + 1})')
+                    span_batch.append([' '.join(span)])
 
         loss_label_batch /= min(1, loop_label_batch)
 
