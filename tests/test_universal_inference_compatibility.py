@@ -200,13 +200,61 @@ def test_batch_attention_and_trees_match_single_documents(device):
 
     docs = [[3, 4, 5], [6, 7, 8, 9, 10]] + [[3] * size for size in (511, 512, 513)]
     with torch.inference_mode():
+        transformer.config.pad_token_id = None
         singles = [model.encoder([doc], None, None, [[]], is_test=True, dataset_index=[0])
                    for doc in docs]
+        transformer.config.pad_token_id = 1
         batched = model.encoder(docs, None, None, [[] for _ in docs], is_test=True,
                                 dataset_index=[0] * len(docs))
     for i, (outputs, hidden, _, _) in enumerate(singles):
         torch.testing.assert_close(batched[0][i, :len(docs[i])], outputs[0], atol=1e-6, rtol=1e-5)
         torch.testing.assert_close(batched[1][:, i], hidden[:, 0], atol=1e-6, rtol=1e-5)
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_trainable_edu_attention_matches_per_edu_calculation(device):
+    torch.manual_seed(9)
+    encoder = EncoderRNN(nn.Identity(), 4, 4, 1, 0, False, nn.ModuleList(),
+                         'trainable', True, False, 1, 256, 64,
+                         token_bilstm_hidden=0, cuda_device=torch.device(device)).to(device).eval()
+    embeddings = torch.randn(12, 4, device=device)
+    with torch.enable_grad():
+        expected = encoder.encode_edus(embeddings, [0, 3, 4, 11])
+    with torch.inference_mode():
+        actual = encoder.encode_edus(embeddings, [0, 3, 4, 11])
+    for left, right in zip(expected, actual):
+        torch.testing.assert_close(left, right, atol=1e-6, rtol=1e-5)
+
+
+def test_window_storage_is_released_before_edu_encoding():
+    import weakref
+
+    class Transformer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(pad_token_id=0)
+            self.storages = []
+
+        def forward(self, ids, attention_mask=None):
+            output = ids.float().unsqueeze(-1).expand(-1, -1, 4).clone()
+            self.storages.append(weakref.ref(output.untyped_storage()))
+            return (output,)
+
+    transformer = Transformer()
+    encoder = EncoderRNN(transformer, 4, 4, 1, 0, False, nn.ModuleList(),
+                         'avg', True, False, 1, 256, 64, token_bilstm_hidden=0,
+                         cuda_device=torch.device('cpu')).eval()
+    encode_edus = encoder.encode_edus
+
+    def check_storage(embeddings, breaks):
+        assert len(transformer.storages) > 1
+        assert all(ref() is None for ref in transformer.storages)
+        return encode_edus(embeddings, breaks)
+
+    encoder.encode_edus = check_storage
+    with torch.inference_mode():
+        encoder([[3] * 1200, [4] * 1400], None, None, [[1199], [1399]],
+                dataset_index=[0, 0])
 
 
 def _legacy_viterbi(crf, emissions, mask):

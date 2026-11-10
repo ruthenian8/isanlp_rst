@@ -130,21 +130,52 @@ class EncoderRNN(nn.Module):
 
         batched_embeddings = {}
         if not self.training and not torch.is_grad_enabled() and not entity_ids and not entity_position_ids:
-            indices = [i for i, tokens in enumerate(input_tokenized_texts)
-                       if 0 < len(tokens) < 512]
             pad_id = getattr(getattr(self.transformer, 'config', None), 'pad_token_id', None)
-            if len(indices) > 1 and pad_id is not None:
-                lengths = [len(input_tokenized_texts[i]) for i in indices]
-                token_batch = torch.full((len(indices), max(lengths)), pad_id,
-                                         dtype=torch.long, device=self._cuda_device)
-                attention_mask = torch.zeros_like(token_batch)
-                for row, (i, length) in enumerate(zip(indices, lengths)):
-                    token_batch[row, :length] = torch.as_tensor(
-                        input_tokenized_texts[i], device=self._cuda_device)
-                    attention_mask[row, :length] = 1
-                outputs = self.transformer(token_batch, attention_mask=attention_mask)[0]
-                for row, (i, length) in enumerate(zip(indices, lengths)):
-                    batched_embeddings[i] = outputs[row:row + 1, :length]
+            if pad_id is not None:
+                windows = []
+                for i, tokens in enumerate(input_tokenized_texts):
+                    length = len(tokens)
+                    if not length:
+                        continue
+                    if length < 512:
+                        windows.append((i, 0, tokens, 0, length))
+                        continue
+                    steps = int(np.ceil(length / self.window_size))
+                    for step in range(steps):
+                        if step == 0:
+                            windows.append((i, step, tokens[:self.window_size + 2 * self.window_padding],
+                                            0, self.window_size))
+                        elif step == steps - 1:
+                            start = self.window_size * step - 2 * self.window_padding
+                            windows.append((i, step, tokens[start:], 2 * self.window_padding, None))
+                        else:
+                            start = self.window_size * step - self.window_padding
+                            end = self.window_size * (step + 1) + self.window_padding
+                            windows.append((i, step, tokens[start:end], self.window_padding,
+                                            self.window_padding + self.window_size))
+                windows.sort(key=lambda item: len(item[2]))
+                group_size = max(2, len(input_tokenized_texts))
+                for start in range(0, len(windows), group_size):
+                    group = windows[start:start + group_size]
+                    lengths = [len(item[2]) for item in group]
+                    token_batch = torch.full((len(group), max(lengths)), pad_id,
+                                             dtype=torch.long, device=self._cuda_device)
+                    attention_mask = torch.zeros_like(token_batch)
+                    for row, (item, length) in enumerate(zip(group, lengths)):
+                        token_batch[row, :length] = torch.as_tensor(item[2], device=self._cuda_device)
+                        attention_mask[row, :length] = 1
+                    outputs = self.transformer(token_batch, attention_mask=attention_mask)[0]
+                    for row, ((i, step, _, left, right), length) in enumerate(zip(group, lengths)):
+                        chunk = outputs[row:row + 1, :length][:, left:right]
+                        if i not in batched_embeddings:
+                            batched_embeddings[i] = outputs.new_empty(
+                                (1, len(input_tokenized_texts[i]), outputs.shape[-1]))
+                        offset = step * self.window_size
+                        if (len(input_tokenized_texts[i]) >= 512 and
+                                chunk.shape[1] != min(self.window_size, len(input_tokenized_texts[i]) - offset)):
+                            raise ValueError('Sliding windows do not cover the document')
+                        batched_embeddings[i][:, offset:offset + chunk.shape[1]].copy_(chunk)
+                    del chunk, outputs
 
         for i in range(len(input_tokenized_texts)):
             token_ids = torch.LongTensor(input_tokenized_texts[i]).to(self._cuda_device)
@@ -152,7 +183,7 @@ class EncoderRNN(nn.Module):
             entity_position_ids_i = torch.LongTensor(entity_position_ids[i]).to(self._cuda_device
                                                                                 ) if entity_position_ids else None
             # Shape: (n_subwords, 768)
-            embeddings = batched_embeddings.get(i)
+            embeddings = batched_embeddings.pop(i, None)
             if embeddings is None:
                 embeddings = self._fixed_sliding_window(token_ids, entity_ids_i, entity_position_ids_i)
             if self.normalize_embeddings:
@@ -188,11 +219,18 @@ class EncoderRNN(nn.Module):
     def encode_edus(self, embeddings, cur_edu_break):
         tmp_edus_list = []
         tmp_break_list = [0, ] + [tmp_j + 1 for tmp_j in cur_edu_break]
+        attention_scores = None
+        if self.edu_encoding_kind == 'trainable' and not self.training and not torch.is_grad_enabled():
+            attention_scores = self._edu_attention(embeddings)
 
         for tmp_i in range(len(tmp_break_list) - 1):
             assert tmp_break_list[tmp_i] < tmp_break_list[tmp_i + 1]
             edu_embeddings = embeddings[tmp_break_list[tmp_i]:tmp_break_list[tmp_i + 1], :]  # Shape: (n_subwords, 768)
-            edu_embedding = self._encode_edu(edu_embeddings)  # Shape: (1, word_emb_shape)
+            if attention_scores is None:
+                edu_embedding = self._encode_edu(edu_embeddings)
+            else:
+                scores = attention_scores[tmp_break_list[tmp_i]:tmp_break_list[tmp_i + 1]]
+                edu_embedding = (edu_embeddings * F.softmax(scores, dim=0)).sum(dim=0, keepdim=True)
             tmp_edus_list.append(edu_embedding)
 
         outputs = torch.cat(tmp_edus_list, dim=0).unsqueeze(dim=0)

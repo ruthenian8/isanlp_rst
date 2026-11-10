@@ -375,8 +375,8 @@ results = parser.parse_batch(['First document.', 'Second document.'], batch_size
 ```
 
 Results follow input order and have the same structure as individual calls.
-Short documents share a padded transformer pass; long documents still use the
-original sliding window. Batch size controls memory use. Floating-point
+Transformer inputs, including sliding windows from long documents, are grouped
+by length for padded passes. Batch size influences memory use. Floating-point
 rounding can lead to different predictions near a decision boundary.
 
 Compare batch inference with individual calls on a GPU:
